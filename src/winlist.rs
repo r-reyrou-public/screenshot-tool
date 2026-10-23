@@ -2,11 +2,14 @@
 
 use std::ffi::c_void;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
-use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
+use windows_sys::Win32::Graphics::Dwm::{
+    DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmGetWindowAttribute,
+};
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, EnumWindows, GWL_EXSTYLE, GetClassNameW, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
-    GetWindowThreadProcessId, IsIconic, IsWindowVisible, SW_RESTORE, SetForegroundWindow, ShowWindow, WS_EX_APPWINDOW,
+    GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed, SW_RESTORE, SetForegroundWindow, ShowWindow, WS_EX_APPWINDOW,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 
@@ -73,7 +76,8 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
         }
         let mut class = [0u16; 64];
         GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32);
-        if matches!(wide_to_string(&class).as_str(), "Progman" | "WorkerW") {
+        // CoreWindow は UWP アプリの中身で、外側の ApplicationFrameWindow と二重になるため枠側だけを使う
+        if matches!(wide_to_string(&class).as_str(), "Progman" | "WorkerW" | "Windows.UI.Core.CoreWindow") {
             return 1;
         }
         let mut title = [0u16; 256];
@@ -86,7 +90,12 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
         if r.right - r.left < 40 || r.bottom - r.top < 30 {
             return 1;
         }
-        list.push(WinInfo { hwnd: hwnd as isize, rect: (r.left, r.top, r.right, r.bottom), title });
+        let rect = (r.left, r.top, r.right, r.bottom);
+        // 手前に同じ枠のウィンドウがあれば、奥のものには当たらないので二重に並べない
+        if list.iter().any(|w| w.rect == rect) {
+            return 1;
+        }
+        list.push(WinInfo { hwnd: hwnd as isize, rect, title });
     }
     1
 }
@@ -97,6 +106,30 @@ pub fn list_windows() -> Vec<WinInfo> {
     // SAFETY: コールバックは呼び出し中のみ list を使う
     unsafe { EnumWindows(Some(enum_proc), &mut list as *mut Vec<WinInfo> as LPARAM) };
     list
+}
+
+/// Windows 11 の角丸の半径(物理ピクセル)。角丸でない(最大化中・無効化・Windows 10)なら 0。
+pub fn corner_radius(hwnd: isize) -> u32 {
+    let hwnd = hwnd as HWND;
+    let mut pref = 0i32;
+    // SAFETY: pref は i32 と同じ大きさの有効な書き込み先。無効な hwnd は失敗を返すだけ
+    unsafe {
+        if IsZoomed(hwnd) != 0 {
+            return 0;
+        }
+        let hr = DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            &mut pref as *mut i32 as *mut c_void,
+            4,
+        );
+        // Windows 10 以前はこの属性が無く失敗する(角丸ではない)
+        if hr != 0 || pref == DWMWCP_DONOTROUND {
+            return 0;
+        }
+        let dpi = GetDpiForWindow(hwnd).max(96);
+        (8 * dpi + 48) / 96
+    }
 }
 
 /// ウィンドウを前面に出してフォーカスを当てる(最小化されていれば戻す)。

@@ -126,13 +126,16 @@ enum Mode {
     Album(Album),
 }
 
+/// ウィンドウ撮影の予約: (撮る時刻, 範囲(物理座標), 角丸の半径)
+type PendingWindow = (Instant, (i32, i32, i32, i32), u32);
+
 pub struct App {
     cfg: Config,
     rx: Receiver<Cmd>,
     mode: Mode,
     pending_capture: Option<Instant>,
     /// ウィンドウ撮影の待機中: (撮る時刻, 対象ウィンドウの物理座標の枠)
-    pending_window: Option<(Instant, (i32, i32, i32, i32))>,
+    pending_window: Option<PendingWindow>,
     /// UI Automation(要素検出)。最初に必要になったときに作る
     uia: Option<Uia>,
     quitting: bool,
@@ -812,11 +815,12 @@ impl App {
         }
         if let Some(i) = chosen_window {
             let win = s.windows[i].clone();
-            self.begin_window_capture(ctx, win.hwnd, win.rect);
+            let radius = crate::winlist::corner_radius(win.hwnd);
+            self.begin_window_capture(ctx, win.hwnd, win.rect, radius);
             return Mode::Idle;
         }
         if let Some((hwnd, rect)) = chosen_elem {
-            self.begin_window_capture(ctx, hwnd, rect);
+            self.begin_window_capture(ctx, hwnd, rect, 0);
             return Mode::Idle;
         }
         match chosen {
@@ -826,12 +830,13 @@ impl App {
     }
 
     /// ウィンドウ `hwnd` を前面に出し、オーバーレイを消してから少し待って、`rect`(物理座標)を撮り直す。
-    fn begin_window_capture(&mut self, ctx: &Context, hwnd: isize, rect: (i32, i32, i32, i32)) {
+    /// `radius` は角丸の半径(物理px)。0 でなければ四隅を透過にする。
+    fn begin_window_capture(&mut self, ctx: &Context, hwnd: isize, rect: (i32, i32, i32, i32), radius: u32) {
         if hwnd != 0 {
             crate::winlist::focus_window(hwnd);
         }
         self.go_idle(ctx);
-        self.pending_window = Some((Instant::now() + Duration::from_millis(350), rect));
+        self.pending_window = Some((Instant::now() + Duration::from_millis(350), rect, radius));
     }
 
     /// 詳細キー押下中の候補を作る。UI Automation の要素(ウィンドウ自身まで)と、撮影済みの画像から
@@ -909,9 +914,9 @@ impl App {
     }
 
     /// 前面に出したウィンドウの枠を、いま見えている画面から切り出して編集画面を開く。
-    fn finish_window_capture(&mut self, ctx: &Context, rect: (i32, i32, i32, i32)) {
+    fn finish_window_capture(&mut self, ctx: &Context, rect: (i32, i32, i32, i32), radius: u32) {
         let (cx, cy) = ((rect.0 + rect.2) / 2, (rect.1 + rect.3) / 2);
-        let shot = match capture::capture_monitor_at(cx, cy) {
+        let mut shot = match capture::capture_monitor_at(cx, cy) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("window capture failed: {e:#}");
@@ -923,7 +928,11 @@ impl App {
         let y0 = (rect.1 - shot.origin.1).clamp(0, ih - 1);
         let x1 = (rect.2 - shot.origin.0).clamp(x0 + 1, iw);
         let y1 = (rect.3 - shot.origin.1).clamp(y0 + 1, ih);
-        self.mode = self.crop_and_edit(ctx, &shot, (x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32));
+        let region = (x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32);
+        if radius > 0 {
+            round_corners(&mut shot.image, region, radius);
+        }
+        self.mode = self.crop_and_edit(ctx, &shot, region);
     }
 
     fn start_editing(&mut self, ctx: &Context, s: &Selecting, sel: Rect, screen: Rect) -> Mode {
@@ -1185,10 +1194,10 @@ impl eframe::App for App {
             self.go_idle(ctx);
         }
 
-        if let Some((at, rect)) = self.pending_window {
+        if let Some((at, rect, radius)) = self.pending_window {
             if Instant::now() >= at {
                 self.pending_window = None;
-                self.finish_window_capture(ctx, rect);
+                self.finish_window_capture(ctx, rect, radius);
             } else {
                 ctx.request_repaint_after(Duration::from_millis(20));
             }
@@ -1223,5 +1232,41 @@ impl eframe::App for App {
         // 編集・設定ウィンドウは他のウィンドウに隠れても Alt+Tab で戻れるようにする
         let listed = matches!(self.mode, Mode::Editing(_) | Mode::Settings(_) | Mode::Album(_));
         crate::winutil::set_listed(frame, listed);
+    }
+}
+
+/// `region`(x, y, 幅, 高さ)の四隅を、半径 `radius` の角丸の外側だけ透過にする(縁は滑らかに)。
+fn round_corners(img: &mut image::RgbaImage, (x, y, w, h): (u32, u32, u32, u32), radius: u32) {
+    let r = radius.min(w / 2).min(h / 2);
+    let rf = r as f32;
+    for dy in 0..r {
+        for dx in 0..r {
+            // 角の円の中心から、画素の中心までの距離
+            let dist = ((rf - dx as f32 - 0.5).powi(2) + (rf - dy as f32 - 0.5).powi(2)).sqrt();
+            let keep = (rf - dist + 0.5).clamp(0.0, 1.0);
+            if keep >= 1.0 {
+                continue;
+            }
+            for (px, py) in [(x + dx, y + dy), (x + w - 1 - dx, y + dy), (x + dx, y + h - 1 - dy), (x + w - 1 - dx, y + h - 1 - dy)] {
+                if let Some(p) = img.get_pixel_mut_checked(px, py) {
+                    p.0[3] = (p.0[3] as f32 * keep).round() as u8;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::round_corners;
+
+    #[test]
+    fn corners_become_transparent_but_center_stays() {
+        let mut img = image::RgbaImage::from_pixel(40, 30, image::Rgba([10, 20, 30, 255]));
+        round_corners(&mut img, (0, 0, 40, 30), 8);
+        assert_eq!(img.get_pixel(0, 0).0[3], 0);
+        assert_eq!(img.get_pixel(39, 29).0[3], 0);
+        assert_eq!(img.get_pixel(20, 15).0[3], 255);
+        assert_eq!(img.get_pixel(8, 0).0[3], 255);
     }
 }
