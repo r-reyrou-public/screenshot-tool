@@ -1,0 +1,209 @@
+use std::path::PathBuf;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Config {
+    /// グローバルホットキー (例: "ctrl+shift+s")。変更は再起動後に反映
+    pub hotkey: String,
+    /// 保存先フォルダ
+    pub save_dir: PathBuf,
+    /// 保存形式: "png" または "jpg"
+    pub format: String,
+    /// ファイル名(拡張子なし)。chrono の書式指定子が使える
+    pub name_pattern: String,
+    /// JPEG 品質 (1-100)
+    pub jpeg_quality: u8,
+    /// 出力倍率(%)。100 で等倍
+    pub scale_percent: u32,
+    /// 出力の長辺の上限(px)。0 で無制限
+    pub max_long_edge: u32,
+    /// ルーペの表示位置: off / top_left / top_right / bottom_left / bottom_right
+    pub loupe_corner: String,
+    /// ルーペの倍率(1画素を何ポイントで表示するか)
+    pub loupe_zoom: u32,
+    /// ルーペの大きさ(ポイント)
+    pub loupe_size: u32,
+    /// 選んだ隅から画面の内側へのずらし量(ポイント)。範囲選択中の Shift+ドラッグでも変えられる
+    pub loupe_offset_x: u32,
+    pub loupe_offset_y: u32,
+    /// 範囲選択中にウィンドウを自動検出して、クリックでそのウィンドウを撮る
+    pub window_snap: bool,
+    /// 押している間だけ `window_snap` を反転させるキー(例: "W", "Tab"。"off" で無効)
+    pub window_snap_key: String,
+    /// ウィンドウ内のUI要素(ボタン・パネルなど)単位まで細かく検出する
+    pub element_snap: bool,
+    /// 押している間だけ `element_snap` を反転させるキー
+    pub element_snap_key: String,
+    /// 押している間だけ、ペインではなく最も細かい要素(ボタンやタブ1つなど)を選ぶキー
+    pub element_detail_key: String,
+    /// 見た目のかたまり検出で、同じかたまりとみなす隙間の大きさ(px)。大きいほど大きなかたまりになる
+    pub visual_gap: u32,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            hotkey: "ctrl+shift+s".into(),
+            save_dir: dirs::picture_dir().unwrap_or_else(|| PathBuf::from(".")).join("ScreenshotTool"),
+            format: "png".into(),
+            name_pattern: "Screenshot_%Y%m%d_%H%M%S".into(),
+            jpeg_quality: 90,
+            scale_percent: 100,
+            max_long_edge: 0,
+            loupe_corner: "bottom_right".into(),
+            loupe_zoom: 8,
+            loupe_size: 180,
+            loupe_offset_x: 104,
+            loupe_offset_y: 118,
+            window_snap: true,
+            window_snap_key: "W".into(),
+            element_snap: false,
+            element_snap_key: "E".into(),
+            element_detail_key: "D".into(),
+            visual_gap: 14,
+        }
+    }
+}
+
+impl Config {
+    pub fn is_jpeg(&self) -> bool {
+        matches!(self.format.to_ascii_lowercase().as_str(), "jpg" | "jpeg")
+    }
+}
+
+/// 実行ファイルと同じフォルダの INI。
+pub fn ini_path() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("ScreenshotTool.ini")))
+        .unwrap_or_else(|| PathBuf::from("ScreenshotTool.ini"))
+}
+
+fn parse(text: &str) -> Config {
+    let mut cfg = Config::default();
+    for line in text.trim_start_matches('\u{feff}').lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with([';', '#', '[']) {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else { continue };
+        let (k, v) = (k.trim().to_ascii_lowercase(), v.trim());
+        match k.as_str() {
+            "hotkey" => cfg.hotkey = v.into(),
+            "save_dir" if !v.is_empty() => cfg.save_dir = PathBuf::from(v),
+            "format" => cfg.format = v.to_ascii_lowercase(),
+            "name_pattern" if !v.is_empty() => cfg.name_pattern = v.into(),
+            "jpeg_quality" => cfg.jpeg_quality = v.parse().unwrap_or(cfg.jpeg_quality).clamp(1, 100),
+            "scale_percent" => cfg.scale_percent = v.parse().unwrap_or(cfg.scale_percent).clamp(1, 400),
+            "max_long_edge" => cfg.max_long_edge = v.parse().unwrap_or(cfg.max_long_edge),
+            "loupe_corner" => cfg.loupe_corner = v.to_ascii_lowercase(),
+            "loupe_zoom" => cfg.loupe_zoom = v.parse().unwrap_or(cfg.loupe_zoom).clamp(2, 32),
+            "loupe_size" => cfg.loupe_size = v.parse().unwrap_or(cfg.loupe_size).clamp(80, 400),
+            "window_snap" => cfg.window_snap = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"),
+            "window_snap_key" => cfg.window_snap_key = v.into(),
+            "element_snap" => cfg.element_snap = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"),
+            "element_snap_key" => cfg.element_snap_key = v.into(),
+            "element_detail_key" => cfg.element_detail_key = v.into(),
+            "visual_gap" => cfg.visual_gap = v.parse().unwrap_or(cfg.visual_gap).clamp(4, 60),
+            "loupe_offset_x" => cfg.loupe_offset_x = v.parse().unwrap_or(cfg.loupe_offset_x).min(4000),
+            "loupe_offset_y" => cfg.loupe_offset_y = v.parse().unwrap_or(cfg.loupe_offset_y).min(4000),
+            _ => {}
+        }
+    }
+    cfg
+}
+
+/// INI を読み込む。無ければ既定値で作成する。
+pub fn load() -> Config {
+    let path = ini_path();
+    match std::fs::read_to_string(&path) {
+        Ok(text) => parse(&text),
+        Err(_) => {
+            let cfg = Config::default();
+            if let Err(e) = save(&cfg) {
+                eprintln!("ini write failed ({}): {e}", path.display());
+            }
+            cfg
+        }
+    }
+}
+
+pub fn save(cfg: &Config) -> std::io::Result<()> {
+    let text = format!(
+        "[General]\r\n\
+         ; グローバルホットキー(変更は再起動後に反映)\r\n\
+         hotkey={}\r\n\
+         \r\n\
+         [Output]\r\n\
+         ; 保存先フォルダ\r\n\
+         save_dir={}\r\n\
+         ; 保存形式: png / jpg\r\n\
+         format={}\r\n\
+         ; ファイル名(拡張子なし)。%Y年 %m月 %d日 %H時 %M分 %S秒 など\r\n\
+         name_pattern={}\r\n\
+         ; JPEG品質 1-100\r\n\
+         jpeg_quality={}\r\n\
+         ; 出力倍率(%) 100で等倍\r\n\
+         scale_percent={}\r\n\
+         ; 出力の長辺上限(px) 0で無制限\r\n\
+         max_long_edge={}\r\n\
+         \r\n\
+         [Loupe]\r\n\
+         ; 範囲選択中のルーペ位置: off / top_left / top_right / bottom_left / bottom_right\r\n\
+         loupe_corner={}\r\n\
+         ; 倍率 2-32\r\n\
+         loupe_zoom={}\r\n\
+         ; 大きさ(ポイント) 80-400\r\n\
+         loupe_size={}\r\n\
+         ; 隅から内側へのずらし量(ポイント)\r\n\
+         loupe_offset_x={}\r\n\
+         loupe_offset_y={}\r\n\
+         \r\n\
+         [WindowSnap]\r\n\
+         ; ウィンドウ自動検出 1=ON 0=OFF(範囲選択中にウィンドウを枠で示し、クリックでそのウィンドウを撮る)\r\n\
+         window_snap={}\r\n\
+         ; 押している間だけON/OFFを反転するキー(例: W, Tab, Space)。offで無効\r\n\
+         window_snap_key={}\r\n\
+         ; ウィンドウ内のUI要素(ボタン・パネルなど)まで細かく検出 1=ON 0=OFF(ホイールで範囲を広げる/狭める)\r\n\
+         element_snap={}\r\n\
+         ; 押している間だけ element_snap を反転するキー\r\n\
+         element_snap_key={}\r\n\
+         ; 押している間だけ最も細かい要素(ボタンやタブ1つなど)を選ぶキー。要素検出がOFFでも使える\r\n\
+         element_detail_key={}\r\n\
+         ; Webページなど要素を公開しない画面で、詳細キーを押したときに見た目から切り出すかたまりの大きさ\r\n\
+         ; (隙間がこのpx以下なら同じかたまり) 4-60。大きいほど大きなかたまりになる\r\n\
+         visual_gap={}\r\n",
+        cfg.hotkey,
+        cfg.save_dir.display(),
+        cfg.format,
+        cfg.name_pattern,
+        cfg.jpeg_quality,
+        cfg.scale_percent,
+        cfg.max_long_edge,
+        cfg.loupe_corner,
+        cfg.loupe_zoom,
+        cfg.loupe_size,
+        cfg.loupe_offset_x,
+        cfg.loupe_offset_y,
+        if cfg.window_snap { 1 } else { 0 },
+        cfg.window_snap_key,
+        if cfg.element_snap { 1 } else { 0 },
+        cfg.element_snap_key,
+        cfg.element_detail_key,
+        cfg.visual_gap,
+    );
+    std::fs::write(ini_path(), text)
+}
+
+/// 命名規則から現在時刻のファイル名(拡張子なし)を作る。書式が不正なら None。
+pub fn format_name(pattern: &str) -> Option<String> {
+    use chrono::format::{Item, StrftimeItems};
+    let items: Vec<Item> = StrftimeItems::new(pattern).collect();
+    if items.iter().any(|i| matches!(i, Item::Error)) {
+        return None;
+    }
+    let name = chrono::Local::now().format_with_items(items.into_iter()).to_string();
+    let name: String = name.chars().map(|c| if "\\/:*?\"<>|".contains(c) { '_' } else { c }).collect();
+    // 末尾のピリオドと空白は Windows が黙って削るので、先に落としておく
+    let name = name.trim().trim_end_matches('.').trim_end().to_string();
+    (!name.is_empty()).then_some(name)
+}

@@ -1,0 +1,299 @@
+use crate::text;
+use egui::{Color32, Pos2, Rect, Vec2, pos2, vec2};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tool {
+    Select,
+    Pen,
+    Highlighter,
+    Line,
+    Arrow,
+    Rect,
+    Ellipse,
+    Text,
+    Bubble,
+    Number,
+    Mosaic,
+    Crop,
+}
+
+#[derive(Clone, Debug)]
+pub enum Geometry {
+    Pen(Vec<Pos2>),
+    Highlight(Vec<Pos2>),
+    Line(Pos2, Pos2),
+    Arrow(Pos2, Pos2),
+    Rect(Pos2, Pos2),
+    Ellipse(Pos2, Pos2),
+    /// `pos` が左上
+    Text {
+        pos: Pos2,
+        text: String,
+    },
+    /// 吹き出し。`size` が `None` なら文字に合わせた最小の大きさ。ハンドルで広げると `Some`
+    Bubble {
+        center: Pos2,
+        text: String,
+        tail: Pos2,
+        style: BubbleStyle,
+        size: Option<Vec2>,
+    },
+    Number {
+        center: Pos2,
+        n: u32,
+    },
+    Mosaic(Pos2, Pos2),
+}
+
+/// 画像ピクセル座標で保持する注釈図形。
+#[derive(Clone, Debug)]
+pub struct Shape {
+    pub geometry: Geometry,
+    pub color: Color32,
+    /// 線の太さ(モザイクでは粗さ)
+    pub width: f32,
+    /// 文字・番号の大きさ(px)
+    pub size: f32,
+}
+
+/// 吹き出しの輪郭の種類。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum BubbleStyle {
+    /// 角丸の四角
+    #[default]
+    Rounded,
+    /// 楕円
+    Ellipse,
+    /// 角のある四角
+    Square,
+    /// もくもく(考えごと): 楕円+小さな丸が連なるしっぽ
+    Thought,
+}
+
+impl BubbleStyle {
+    pub const ALL: [(BubbleStyle, &'static str); 4] = [
+        (BubbleStyle::Rounded, "角丸"),
+        (BubbleStyle::Ellipse, "楕円"),
+        (BubbleStyle::Square, "四角"),
+        (BubbleStyle::Thought, "もくもく"),
+    ];
+
+    /// 本体が楕円かどうか(楕円は四角より文字が収まりにくいので、余白を多めにとる)
+    pub fn is_oval(self) -> bool {
+        matches!(self, BubbleStyle::Ellipse | BubbleStyle::Thought)
+    }
+}
+
+/// 吹き出しの形: 本体の矩形・角丸半径・しっぽ(根元2点+先端)。
+pub struct BubbleParts {
+    pub rect: Rect,
+    pub radius: f32,
+    pub style: BubbleStyle,
+    pub tail: Option<[Pos2; 3]>,
+}
+
+fn rect_of(a: Pos2, b: Pos2) -> Rect {
+    Rect::from_two_pos(a, b)
+}
+
+fn bounds_of(points: &[Pos2]) -> Rect {
+    points.iter().fold(Rect::NOTHING, |r, p| r.union(Rect::from_min_max(*p, *p)))
+}
+
+impl Shape {
+    /// 線として描く図形の実効の太さ。蛍光ペンは太く描く。
+    pub fn stroke_width(&self) -> f32 {
+        match self.geometry {
+            Geometry::Highlight(_) => (self.width * 3.5).max(14.0),
+            _ => self.width,
+        }
+    }
+
+    pub fn number_radius(&self) -> f32 {
+        self.size * 0.75
+    }
+
+    /// 線分の集まりとして描く図形を分解する。それ以外は空。
+    pub fn segments(&self) -> Vec<(Pos2, Pos2)> {
+        match &self.geometry {
+            Geometry::Pen(points) | Geometry::Highlight(points) => match points.as_slice() {
+                [] => vec![],
+                [p] => vec![(*p, *p)],
+                _ => points.windows(2).map(|w| (w[0], w[1])).collect(),
+            },
+            Geometry::Line(a, b) => vec![(*a, *b)],
+            Geometry::Rect(a, b) => {
+                let r = rect_of(*a, *b);
+                let (tl, br) = (r.min, r.max);
+                let (tr, bl) = (pos2(br.x, tl.y), pos2(tl.x, br.y));
+                vec![(tl, tr), (tr, br), (br, bl), (bl, tl)]
+            }
+            Geometry::Ellipse(a, b) => {
+                let r = rect_of(*a, *b);
+                let (c, rx, ry) = (r.center(), r.width() / 2.0, r.height() / 2.0);
+                const N: usize = 96;
+                let pt = |i: usize| {
+                    let t = i as f32 / N as f32 * std::f32::consts::TAU;
+                    pos2(c.x + rx * t.cos(), c.y + ry * t.sin())
+                };
+                (0..N).map(|i| (pt(i), pt(i + 1))).collect()
+            }
+            Geometry::Arrow(a, b) => {
+                let mut segs = vec![(*a, *b)];
+                let dir = *b - *a;
+                if dir.length() > 1.0 {
+                    let dir = dir.normalized();
+                    let head = (self.width * 4.0).max(14.0);
+                    for sign in [-1.0f32, 1.0] {
+                        let (s, c) = (sign * 25f32.to_radians()).sin_cos();
+                        let rot = vec2(dir.x * c - dir.y * s, dir.x * s + dir.y * c);
+                        segs.push((*b, *b - rot * head));
+                    }
+                }
+                segs
+            }
+            _ => vec![],
+        }
+    }
+
+    /// 吹き出し本体の最小の大きさ(文字が収まる大きさ)。
+    pub fn bubble_min_size(&self) -> Vec2 {
+        let Geometry::Bubble { text, style, .. } = &self.geometry else { return Vec2::ZERO };
+        let sample = if text.is_empty() { "あああ" } else { text.as_str() };
+        let pad = self.size * 0.6;
+        let min = text::measure(sample, self.size) + vec2(pad * 2.0, pad * 1.4);
+        if style.is_oval() { min * 1.4 } else { min }
+    }
+
+    pub fn bubble_parts(&self) -> Option<BubbleParts> {
+        let Geometry::Bubble { center, tail, style, size, .. } = &self.geometry else { return None };
+        let min = self.bubble_min_size();
+        let dims = size.map_or(min, |s| vec2(s.x.max(min.x), s.y.max(min.y)));
+        let rect = Rect::from_center_size(*center, dims);
+        let radius = match style {
+            BubbleStyle::Square => 0.0,
+            BubbleStyle::Rounded => (rect.height() / 2.0).min(self.size * 0.9),
+            BubbleStyle::Ellipse | BubbleStyle::Thought => rect.width().min(rect.height()) / 2.0,
+        };
+        let style = *style;
+        if rect.expand(1.0).contains(*tail) {
+            return Some(BubbleParts { rect, radius, style, tail: None });
+        }
+        // しっぽは、先端に最も近い辺から出す。根元は、角(楕円なら端の近く)を避けて辺の中ほどに置く
+        let margin = |len: f32| if style.is_oval() { len * 0.25 } else { radius.min(len / 2.0) };
+        let d = *tail - rect.center();
+        let horizontal = d.x.abs() / (rect.width() / 2.0) > d.y.abs() / (rect.height() / 2.0);
+        let half = (self.size * 0.5).min(if horizontal { rect.height() } else { rect.width() } / 4.0);
+        let tail_pts = if horizontal {
+            let x = if d.x > 0.0 { rect.max.x } else { rect.min.x };
+            let m = margin(rect.height());
+            let (lo, hi) = (rect.min.y + m + half, rect.max.y - m - half);
+            let y = if lo < hi { tail.y.clamp(lo, hi) } else { rect.center().y };
+            [pos2(x, y - half), pos2(x, y + half), *tail]
+        } else {
+            let y = if d.y > 0.0 { rect.max.y } else { rect.min.y };
+            let m = margin(rect.width());
+            let (lo, hi) = (rect.min.x + m + half, rect.max.x - m - half);
+            let x = if lo < hi { tail.x.clamp(lo, hi) } else { rect.center().x };
+            [pos2(x - half, y), pos2(x + half, y), *tail]
+        };
+        // 楕円は外接矩形の辺より内側に縁があるので、根元を縁の上に載せる(段差を作らない)
+        let tail_pts = if style.is_oval() {
+            let (c, r) = (rect.center(), rect.size() / 2.0);
+            let on_edge = |p: Pos2| {
+                if horizontal {
+                    let k = ((p.y - c.y) / r.y).clamp(-0.98, 0.98);
+                    let dx = r.x * (1.0 - k * k).sqrt() - 1.0;
+                    pos2(c.x + dx * (p.x - c.x).signum(), p.y)
+                } else {
+                    let k = ((p.x - c.x) / r.x).clamp(-0.98, 0.98);
+                    let dy = r.y * (1.0 - k * k).sqrt() - 1.0;
+                    pos2(p.x, c.y + dy * (p.y - c.y).signum())
+                }
+            };
+            [on_edge(tail_pts[0]), on_edge(tail_pts[1]), tail_pts[2]]
+        } else {
+            tail_pts
+        };
+        Some(BubbleParts { rect, radius, style, tail: Some(tail_pts) })
+    }
+    /// 画像座標での外接矩形(線の太さ込み)。
+    pub fn bounds(&self) -> Rect {
+        match &self.geometry {
+            Geometry::Pen(p) | Geometry::Highlight(p) => bounds_of(p).expand(self.stroke_width() / 2.0 + 1.0),
+            Geometry::Line(a, b) | Geometry::Rect(a, b) | Geometry::Ellipse(a, b) => {
+                rect_of(*a, *b).expand(self.width / 2.0 + 1.0)
+            }
+            Geometry::Arrow(a, b) => {
+                let head = (self.width * 4.0).max(14.0);
+                rect_of(*a, *b).expand(self.width / 2.0 + head + 1.0)
+            }
+            Geometry::Text { pos, text } => {
+                let sample = if text.is_empty() { "あ" } else { text.as_str() };
+                Rect::from_min_size(*pos, text::measure(sample, self.size))
+            }
+            Geometry::Bubble { center, .. } => match self.bubble_parts() {
+                Some(parts) => {
+                    let mut r = parts.rect;
+                    if let Some(t) = parts.tail {
+                        r = r.union(bounds_of(&t));
+                    }
+                    r.expand(self.width / 2.0 + 2.0)
+                }
+                None => Rect::from_center_size(*center, Vec2::ZERO),
+            },
+            Geometry::Number { center, .. } => {
+                Rect::from_center_size(*center, Vec2::splat(self.number_radius() * 2.0 + 2.0))
+            }
+            Geometry::Mosaic(a, b) => rect_of(*a, *b),
+        }
+    }
+
+    /// 点 `p`(画像座標)が図形に当たっているか。`tol` は許容距離。
+    pub fn hit(&self, p: Pos2, tol: f32) -> bool {
+        let segs = self.segments();
+        if !segs.is_empty() {
+            let r = self.stroke_width() / 2.0 + tol;
+            return segs.iter().any(|(a, b)| dist_to_segment(p, *a, *b) <= r);
+        }
+        self.bounds().expand(tol).contains(p)
+    }
+
+    pub fn translate(&mut self, d: Vec2) {
+        let mv = |p: &mut Pos2| *p += d;
+        match &mut self.geometry {
+            Geometry::Pen(pts) | Geometry::Highlight(pts) => pts.iter_mut().for_each(mv),
+            Geometry::Line(a, b)
+            | Geometry::Arrow(a, b)
+            | Geometry::Rect(a, b)
+            | Geometry::Ellipse(a, b)
+            | Geometry::Mosaic(a, b) => {
+                mv(a);
+                mv(b);
+            }
+            Geometry::Text { pos, .. } => mv(pos),
+            Geometry::Bubble { center, tail, .. } => {
+                mv(center);
+                mv(tail);
+            }
+            Geometry::Number { center, .. } => mv(center),
+        }
+    }
+
+    pub fn translated(&self, d: Vec2) -> Shape {
+        let mut s = self.clone();
+        s.translate(d);
+        s
+    }
+
+    pub fn is_text_like(&self) -> bool {
+        matches!(self.geometry, Geometry::Text { .. } | Geometry::Bubble { .. })
+    }
+}
+
+pub fn dist_to_segment(p: Pos2, a: Pos2, b: Pos2) -> f32 {
+    let ab = b - a;
+    let len2 = ab.length_sq();
+    let t = if len2 <= f32::EPSILON { 0.0 } else { (((p - a).x * ab.x + (p - a).y * ab.y) / len2).clamp(0.0, 1.0) };
+    (p - (a + ab * t)).length()
+}
