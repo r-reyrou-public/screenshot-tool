@@ -1,7 +1,7 @@
 //! 編集画面: 図形・文字・吹き出し・番号・モザイク・トリミングなどの注釈編集。
 
 use crate::raster;
-use crate::shapes::{BubbleStyle, Geometry, Shape, Tool};
+use crate::shapes::{BracketStyle, BubbleStyle, Geometry, NumberStyle, Shape, Tool};
 use egui::{
     Color32, ColorImage, Context, CursorIcon, Key, Modifiers, Pos2, Rect, Sense, Stroke, TextureHandle, TextureOptions,
     Vec2, pos2, vec2,
@@ -16,14 +16,17 @@ pub enum Outcome {
     Discard,
 }
 
-const TOOLS: [(Tool, &str); 12] = [
+const TOOLS: [(Tool, &str); 15] = [
     (Tool::Select, "選択"),
     (Tool::Pen, "ペン"),
     (Tool::Highlighter, "蛍光ペン"),
     (Tool::Line, "直線"),
     (Tool::Arrow, "矢印"),
+    (Tool::DoubleArrow, "両矢印"),
+    (Tool::CurveArrow, "曲線矢印"),
     (Tool::Rect, "四角"),
     (Tool::Ellipse, "楕円"),
+    (Tool::Bracket, "括弧"),
     (Tool::Text, "文字"),
     (Tool::Bubble, "吹き出し"),
     (Tool::Number, "番号"),
@@ -43,12 +46,15 @@ pub fn hint(tool: Tool) -> &'static str {
         Tool::Highlighter => "ドラッグで蛍光ペン(重ねても濃くなりません)",
         Tool::Line => "ドラッグで直線 / Shift で45度刻み",
         Tool::Arrow => "ドラッグで矢印 / Shift で45度刻み",
+        Tool::DoubleArrow => "ドラッグで両端に矢じりのある矢印 / Shift で45度刻み",
+        Tool::CurveArrow => "ドラッグで曲線の矢印(中央のつまみで曲がりを調整)",
         Tool::Rect => "ドラッグで四角 / Shift で正方形",
         Tool::Ellipse => "ドラッグで楕円 / Shift で正円",
+        Tool::Bracket => "ドラッグした範囲を左右から挟む括弧(丸・角・波を選べます)",
         Tool::Text => "クリックした位置に文字を入れる",
         Tool::Bubble => "しっぽの先から、吹き出しを置きたい位置へドラッグ",
-        Tool::Number => "クリックで連番マークを置く",
-        Tool::Mosaic => "ドラッグした範囲にモザイク(太さ=粗さ)",
+        Tool::Number => "クリックで連番マークを置く(丸・四角、塗り・逆を選べます)",
+        Tool::Mosaic => "ドラッグした範囲にモザイク(強度スライダーで粗さを変更)",
         Tool::Crop => "ドラッグで範囲を決め、Enter で切り抜き",
     }
 }
@@ -76,6 +82,8 @@ enum Handle {
     L,
     /// 吹き出しのしっぽの先
     Tail,
+    /// 曲線矢印の曲がり(曲線上の中点を掴む)
+    Bend,
     /// 文字・番号・吹き出しの大きさ
     Size,
 }
@@ -103,8 +111,17 @@ fn points_rect(pts: &[Pos2]) -> Rect {
 /// 図形ごとの変形ハンドルの位置(画像座標)。
 fn shape_handles(s: &Shape) -> Vec<(Handle, Pos2)> {
     match &s.geometry {
-        Geometry::Line(a, b) | Geometry::Arrow(a, b) => vec![(Handle::Start, *a), (Handle::End, *b)],
-        Geometry::Rect(a, b) | Geometry::Ellipse(a, b) | Geometry::Mosaic(a, b) => {
+        Geometry::Line(a, b) | Geometry::Arrow(a, b) | Geometry::DoubleArrow(a, b) => {
+            vec![(Handle::Start, *a), (Handle::End, *b)]
+        }
+        Geometry::CurveArrow { a, b, .. } => {
+            let mut v = vec![(Handle::Start, *a), (Handle::End, *b)];
+            if let Some(m) = s.curve_mid() {
+                v.push((Handle::Bend, m));
+            }
+            v
+        }
+        Geometry::Rect(a, b) | Geometry::Ellipse(a, b) | Geometry::Mosaic(a, b) | Geometry::Bracket { a, b, .. } => {
             rect_handles(Rect::from_two_pos(*a, *b)).to_vec()
         }
         Geometry::Pen(p) | Geometry::Highlight(p) => rect_handles(points_rect(p)).to_vec(),
@@ -148,9 +165,22 @@ fn resize_rect(r: Rect, h: Handle, p: Pos2) -> Rect {
 fn apply_handle(orig: &Shape, h: Handle, p: Pos2, shift: bool) -> Shape {
     let mut s = orig.clone();
     match (&mut s.geometry, h) {
-        (Geometry::Line(a, b) | Geometry::Arrow(a, b), Handle::Start) => *a = if shift { snap_angle(*b, p) } else { p },
-        (Geometry::Line(a, b) | Geometry::Arrow(a, b), Handle::End) => *b = if shift { snap_angle(*a, p) } else { p },
-        (Geometry::Rect(a, b) | Geometry::Ellipse(a, b) | Geometry::Mosaic(a, b), _) => {
+        (Geometry::Line(a, b) | Geometry::Arrow(a, b) | Geometry::DoubleArrow(a, b), Handle::Start) => {
+            *a = if shift { snap_angle(*b, p) } else { p }
+        }
+        (Geometry::Line(a, b) | Geometry::Arrow(a, b) | Geometry::DoubleArrow(a, b), Handle::End) => {
+            *b = if shift { snap_angle(*a, p) } else { p }
+        }
+        (Geometry::CurveArrow { a, .. }, Handle::Start) => *a = p,
+        (Geometry::CurveArrow { b, .. }, Handle::End) => *b = p,
+        (Geometry::CurveArrow { a, b, ctrl }, Handle::Bend) => {
+            // 曲線上の中点が p に来るように制御点を決める(中点 = (a + 2c + b) / 4)
+            *ctrl = pos2(2.0 * p.x - (a.x + b.x) / 2.0, 2.0 * p.y - (a.y + b.y) / 2.0);
+        }
+        (
+            Geometry::Rect(a, b) | Geometry::Ellipse(a, b) | Geometry::Mosaic(a, b) | Geometry::Bracket { a, b, .. },
+            _,
+        ) => {
             let old = Rect::from_two_pos(*a, *b);
             let new = resize_rect(old, h, p);
             (*a, *b) = (new.min, new.max);
@@ -230,6 +260,12 @@ pub struct Editor {
     width: f32,
     font_size: f32,
     bubble_style: BubbleStyle,
+    bracket_style: BracketStyle,
+    number_style: NumberStyle,
+    /// モザイクの強度(ブロックの1辺の画素数)。次に描くモザイクに使う
+    mosaic_block: f32,
+    /// スライダーを動かしている間、元に戻す用の記録を1回だけ残すための印
+    slider_undo_pushed: bool,
     zoom: f32,
     pub status: String,
     current: Option<Shape>,
@@ -261,6 +297,10 @@ impl Editor {
             width: 4.0,
             font_size: 28.0,
             bubble_style: BubbleStyle::default(),
+            bracket_style: BracketStyle::default(),
+            number_style: NumberStyle::default(),
+            mosaic_block: 14.0,
+            slider_undo_pushed: false,
             zoom,
             status: format!("Enter: 保存してコピー  /  Ctrl+C: コピーのみ  /  Esc: 破棄  |  {}", hint(Tool::Pen)),
             current: None,
@@ -339,7 +379,9 @@ impl Editor {
     }
 
     fn new_shape(&self, geometry: Geometry) -> Shape {
-        Shape { geometry, color: self.color32(), width: self.width, size: self.font_size }
+        // モザイクは `width` に強度(ブロックの大きさ)を持つ
+        let width = if matches!(geometry, Geometry::Mosaic(..)) { self.mosaic_block } else { self.width };
+        Shape { geometry, color: self.color32(), width, size: self.font_size }
     }
 
     fn start_geometry(&self, p: Pos2) -> Option<Geometry> {
@@ -348,6 +390,9 @@ impl Editor {
             Tool::Highlighter => Geometry::Highlight(vec![p]),
             Tool::Line => Geometry::Line(p, p),
             Tool::Arrow => Geometry::Arrow(p, p),
+            Tool::DoubleArrow => Geometry::DoubleArrow(p, p),
+            Tool::CurveArrow => Geometry::CurveArrow { a: p, b: p, ctrl: p },
+            Tool::Bracket => Geometry::Bracket { a: p, b: p, style: self.bracket_style },
             Tool::Rect => Geometry::Rect(p, p),
             Tool::Ellipse => Geometry::Ellipse(p, p),
             Tool::Mosaic => Geometry::Mosaic(p, p),
@@ -473,6 +518,7 @@ impl Editor {
         }
 
         self.toolbar(root, &ctx, &mut out);
+        self.tool_palette(root);
 
         egui::Panel::bottom("status").exact_size(28.0).show(root, |ui| {
             ui.horizontal_centered(|ui| ui.label(&self.status));
@@ -484,12 +530,28 @@ impl Editor {
         out
     }
 
-    fn toolbar(&mut self, root: &mut egui::Ui, ctx: &Context, out: &mut Outcome) {
-        egui::Panel::top("toolbar").resizable(false).show(root, |ui| {
-            ui.add_space(3.0);
-            ui.horizontal_wrapped(|ui| {
+    /// 左側に縦一列で並ぶ、アイコンのツールパレット。名前はホバーで表示する。
+    fn tool_palette(&mut self, root: &mut egui::Ui) {
+        const ICON: f32 = 32.0;
+        egui::Panel::left("tools").resizable(false).exact_size(ICON + 16.0).show(root, |ui| {
+            // ウィンドウが低くて全部は入らないときは、パレットだけスクロールさせる
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 3.0;
                 for (tool, label) in TOOLS {
-                    if ui.selectable_label(self.tool == tool, label).clicked() && self.tool != tool {
+                    let (rect, resp) = ui.allocate_exact_size(vec2(ICON, ICON), Sense::click());
+                    let selected = self.tool == tool;
+                    let visuals = ui.visuals();
+                    let bg = if selected {
+                        Color32::from_rgb(0, 110, 160)
+                    } else if resp.hovered() {
+                        visuals.widgets.hovered.bg_fill
+                    } else {
+                        Color32::TRANSPARENT
+                    };
+                    ui.painter().rect_filled(rect, 5.0, bg);
+                    let ink = if selected { Color32::WHITE } else { visuals.text_color() };
+                    crate::icons::paint(ui.painter(), rect.shrink(4.0), tool, ink);
+                    if resp.on_hover_text(label).clicked() && !selected {
                         self.tool = tool;
                         self.current = None;
                         self.crop = None;
@@ -497,6 +559,12 @@ impl Editor {
                     }
                 }
             });
+        });
+    }
+
+    fn toolbar(&mut self, root: &mut egui::Ui, ctx: &Context, out: &mut Outcome) {
+        egui::Panel::top("toolbar").resizable(false).show(root, |ui| {
+            ui.add_space(3.0);
             ui.horizontal_wrapped(|ui| {
                 let before = self.color;
                 for c in SWATCHES {
@@ -526,12 +594,13 @@ impl Editor {
                     self.recolor_selected();
                 }
                 ui.separator();
-                let width_label = if self.tool == Tool::Mosaic { "粗さ" } else { "太さ" };
-                ui.add(egui::Slider::new(&mut self.width, 1.0..=24.0).text(width_label));
+                self.strength_ui(ui, ctx);
                 if matches!(self.tool, Tool::Text | Tool::Bubble | Tool::Number) {
                     ui.add(egui::Slider::new(&mut self.font_size, 10.0..=120.0).text("文字"));
                 }
                 self.bubble_style_ui(ui);
+                self.bracket_style_ui(ui);
+                self.number_style_ui(ui);
                 ui.separator();
                 if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("↶ 戻す")).clicked() {
                     self.undo_step();
@@ -570,6 +639,103 @@ impl Editor {
             });
             ui.add_space(3.0);
         });
+    }
+
+    /// 選択ツールで図形を選んでいるときは、その図形の太さ(モザイクなら強度)を、
+    /// そうでなければ次に描く図形の太さ(モザイクなら強度)を変えるスライダー。
+    fn strength_ui(&mut self, ui: &mut egui::Ui, ctx: &Context) {
+        if !ctx.input(|i| i.pointer.any_down()) {
+            self.slider_undo_pushed = false;
+        }
+        let selected = if self.tool == Tool::Select { self.selected.filter(|&i| i < self.shapes.len()) } else { None };
+        let is_mosaic = match selected {
+            Some(i) => matches!(self.shapes[i].geometry, Geometry::Mosaic(..)),
+            None => self.tool == Tool::Mosaic,
+        };
+        let (range, label) = if is_mosaic { (4.0..=64.0, "モザイク強度") } else { (1.0..=24.0, "太さ") };
+        let mut value = match selected {
+            Some(i) => self.shapes[i].width,
+            None if is_mosaic => self.mosaic_block,
+            None => self.width,
+        };
+        if !ui.add(egui::Slider::new(&mut value, range).text(label)).changed() {
+            return;
+        }
+        match selected {
+            Some(i) => {
+                // ドラッグ中に何度も記録しないよう、動かし始めの1回だけ元に戻す記録を残す
+                if !self.slider_undo_pushed {
+                    self.push_undo();
+                    self.slider_undo_pushed = true;
+                }
+                self.shapes[i].width = value;
+                self.rebuild();
+            }
+            None if is_mosaic => self.mosaic_block = value,
+            None => self.width = value,
+        }
+    }
+
+    /// 括弧の種類(丸・角・波)を選ぶ。括弧ツール中か、括弧を選択中に出す。
+    fn bracket_style_ui(&mut self, ui: &mut egui::Ui) {
+        let selected = self
+            .selected
+            .filter(|&i| i < self.shapes.len() && matches!(self.shapes[i].geometry, Geometry::Bracket { .. }));
+        if self.tool != Tool::Bracket && selected.is_none() {
+            return;
+        }
+        let current = match selected.map(|i| &self.shapes[i].geometry) {
+            Some(Geometry::Bracket { style, .. }) => *style,
+            _ => self.bracket_style,
+        };
+        let mut style = current;
+        let label = BracketStyle::ALL.iter().find(|(s, _)| *s == style).map_or("", |(_, l)| *l);
+        egui::ComboBox::from_id_salt("bracket_style").selected_text(format!("括弧: {label}")).show_ui(ui, |ui| {
+            for (s, l) in BracketStyle::ALL {
+                ui.selectable_value(&mut style, s, l);
+            }
+        });
+        if style != current {
+            self.bracket_style = style;
+            if let Some(i) = selected {
+                self.push_undo();
+                if let Geometry::Bracket { style: st, .. } = &mut self.shapes[i].geometry {
+                    *st = style;
+                }
+                self.rebuild();
+            }
+        }
+    }
+
+    /// 番号マーカーの見た目(丸・四角、塗り・逆)を選ぶ。番号ツール中か、番号を選択中に出す。
+    fn number_style_ui(&mut self, ui: &mut egui::Ui) {
+        let selected = self
+            .selected
+            .filter(|&i| i < self.shapes.len() && matches!(self.shapes[i].geometry, Geometry::Number { .. }));
+        if self.tool != Tool::Number && selected.is_none() {
+            return;
+        }
+        let current = match selected.map(|i| &self.shapes[i].geometry) {
+            Some(Geometry::Number { style, .. }) => *style,
+            _ => self.number_style,
+        };
+        let mut style = current;
+        let label = NumberStyle::ALL.iter().find(|(s, _)| *s == style).map_or("", |(_, l)| *l);
+        egui::ComboBox::from_id_salt("number_style").selected_text(format!("番号: {label}")).show_ui(ui, |ui| {
+            for (s, l) in NumberStyle::ALL {
+                ui.selectable_value(&mut style, s, l);
+            }
+        });
+        if style != current {
+            self.number_style = style;
+            if let Some(i) = selected {
+                self.push_undo();
+                if let Geometry::Number { style: st, .. } = &mut self.shapes[i].geometry {
+                    *st = style;
+                }
+                self.rebuild();
+            }
+        }
     }
 
     /// 吹き出しの輪郭(角丸・楕円・四角・もくもく)を選ぶ。吹き出しツール中か、吹き出しを選択中に出す。
@@ -678,7 +844,7 @@ impl Editor {
                         .max()
                         .unwrap_or(0)
                         + 1;
-                    let shape = self.new_shape(Geometry::Number { center: p, n });
+                    let shape = self.new_shape(Geometry::Number { center: p, n, style: self.number_style });
                     self.commit(shape);
                 }
             }
@@ -734,6 +900,9 @@ impl Editor {
                 }
                 Geometry::Line(a, b)
                 | Geometry::Arrow(a, b)
+                | Geometry::DoubleArrow(a, b)
+                | Geometry::CurveArrow { a, b, .. }
+                | Geometry::Bracket { a, b, .. }
                 | Geometry::Rect(a, b)
                 | Geometry::Ellipse(a, b)
                 | Geometry::Mosaic(a, b) => {
@@ -979,7 +1148,17 @@ fn update_geometry(g: &mut Geometry, p: Pos2, shift: bool) {
                 pts.push(p);
             }
         }
-        Geometry::Line(a, b) | Geometry::Arrow(a, b) => *b = if shift { snap_angle(*a, p) } else { p },
+        Geometry::Line(a, b) | Geometry::Arrow(a, b) | Geometry::DoubleArrow(a, b) => {
+            *b = if shift { snap_angle(*a, p) } else { p }
+        }
+        Geometry::CurveArrow { a, b, ctrl } => {
+            *b = if shift { snap_angle(*a, p) } else { p };
+            // 最初は、始点と終点を結ぶ線から少し(長さの2割)ふくらませた曲線にする
+            let (mid, d) = ((a.to_vec2() + b.to_vec2()) / 2.0, *b - *a);
+            let bulge = vec2(-d.y, d.x) * 0.2;
+            *ctrl = pos2(mid.x + bulge.x, mid.y + bulge.y);
+        }
+        Geometry::Bracket { b, .. } => *b = p,
         Geometry::Rect(a, b) | Geometry::Ellipse(a, b) => {
             *b = if shift {
                 let d = p - *a;

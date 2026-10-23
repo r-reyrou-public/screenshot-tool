@@ -39,6 +39,27 @@ pub fn measure(text: &str, size: f32) -> Vec2 {
     vec2(w, lines.len() as f32 * line_height(size))
 }
 
+/// 1行のテキストを `draw` で描いたときの、実際に塗られる範囲(`pos` からの相対)。
+/// 行の高さや送り幅ではなく字形そのものの範囲なので、数字を円の中心に置くときなどに使う。
+pub fn ink_bounds(text: &str, size: f32) -> Option<egui::Rect> {
+    let f = font()?;
+    let scale = PxScale::from(size);
+    let s = f.as_scaled(scale);
+    let baseline = s.ascent();
+    let mut x = 0.0;
+    let mut bounds: Option<egui::Rect> = None;
+    for ch in text.lines().next().unwrap_or("").chars() {
+        let id = f.glyph_id(ch);
+        if let Some(og) = f.outline_glyph(id.with_scale_and_position(scale, point(x, baseline))) {
+            let b = og.px_bounds();
+            let r = egui::Rect::from_min_max(egui::pos2(b.min.x, b.min.y), egui::pos2(b.max.x, b.max.y));
+            bounds = Some(bounds.map_or(r, |acc| acc.union(r)));
+        }
+        x += s.h_advance(id);
+    }
+    bounds
+}
+
 /// `pos` を左上として文字を描く。
 pub fn draw(img: &mut RgbaImage, pos: egui::Pos2, text: &str, size: f32, color: [u8; 4]) {
     let Some(f) = font() else { return };

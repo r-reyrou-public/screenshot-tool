@@ -1,9 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod autostart;
 mod capture;
 mod config;
 mod editor;
+mod icons;
 mod output;
 mod raster;
 mod shapes;
@@ -64,6 +66,10 @@ fn run() -> Result<()> {
         return Ok(());
     }
     let cfg = config::load();
+    // 設定の自動起動の有無と、レジストリの登録(exe の場所を含む)を合わせる
+    if let Err(e) = autostart::sync(cfg.autostart) {
+        eprintln!("autostart: {e}");
+    }
     let hotkey: HotKey = cfg.hotkey.parse().map_err(|e| anyhow!("ホットキー設定が不正です ({}): {e}", cfg.hotkey))?;
 
     let options = eframe::NativeOptions {

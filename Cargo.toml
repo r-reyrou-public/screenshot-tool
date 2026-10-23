@@ -1,6 +1,6 @@
 [package]
 name = "screenshot-tool"
-version = "0.1.0"
+version = "0.6.0"
 edition = "2024"
 description = "Windows 向けの常駐型スクリーンショット&注釈ツール(egui)"
 readme = "README.md"
@@ -19,7 +19,7 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 raw-window-handle = "0.6.2"
 rfd = "0.17.2"
 tray-icon = "0.26.1"
-windows = { version = "0.62.2", features = ["Win32_UI_Accessibility", "Win32_System_Com", "Win32_Foundation"] }
+windows = { version = "0.62.2", features = ["Win32_UI_Accessibility", "Win32_System_Com", "Win32_Foundation", "Win32_UI_Shell", "Win32_Storage_FileSystem"] }
 windows-core = "0.62"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Security", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 xcap = "0.9.8"

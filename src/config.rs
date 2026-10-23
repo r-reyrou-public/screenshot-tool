@@ -35,6 +35,8 @@ pub struct Config {
     pub element_snap_key: String,
     /// 押している間だけ、ペインではなく最も細かい要素(ボタンやタブ1つなど)を選ぶキー
     pub element_detail_key: String,
+    /// Windows の起動時に、このツールも自動で起動する
+    pub autostart: bool,
     /// 見た目のかたまり検出で、同じかたまりとみなす隙間の大きさ(px)。大きいほど大きなかたまりになる
     pub visual_gap: u32,
 }
@@ -60,6 +62,7 @@ impl Default for Config {
             element_snap_key: "E".into(),
             element_detail_key: "D".into(),
             visual_gap: 14,
+            autostart: false,
         }
     }
 }
@@ -103,6 +106,7 @@ fn parse(text: &str) -> Config {
             "element_snap" => cfg.element_snap = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"),
             "element_snap_key" => cfg.element_snap_key = v.into(),
             "element_detail_key" => cfg.element_detail_key = v.into(),
+            "autostart" => cfg.autostart = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"),
             "visual_gap" => cfg.visual_gap = v.parse().unwrap_or(cfg.visual_gap).clamp(4, 60),
             "loupe_offset_x" => cfg.loupe_offset_x = v.parse().unwrap_or(cfg.loupe_offset_x).min(4000),
             "loupe_offset_y" => cfg.loupe_offset_y = v.parse().unwrap_or(cfg.loupe_offset_y).min(4000),
@@ -132,6 +136,8 @@ pub fn save(cfg: &Config) -> std::io::Result<()> {
         "[General]\r\n\
          ; グローバルホットキー(変更は再起動後に反映)\r\n\
          hotkey={}\r\n\
+         ; Windows の起動時にこのツールも自動で起動する 1=ON 0=OFF\r\n\
+         autostart={}\r\n\
          \r\n\
          [Output]\r\n\
          ; 保存先フォルダ\r\n\
@@ -173,6 +179,7 @@ pub fn save(cfg: &Config) -> std::io::Result<()> {
          ; (隙間がこのpx以下なら同じかたまり) 4-60。大きいほど大きなかたまりになる\r\n\
          visual_gap={}\r\n",
         cfg.hotkey,
+        if cfg.autostart { 1 } else { 0 },
         cfg.save_dir.display(),
         cfg.format,
         cfg.name_pattern,

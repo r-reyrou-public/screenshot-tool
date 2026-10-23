@@ -8,8 +8,11 @@ pub enum Tool {
     Highlighter,
     Line,
     Arrow,
+    DoubleArrow,
+    CurveArrow,
     Rect,
     Ellipse,
+    Bracket,
     Text,
     Bubble,
     Number,
@@ -23,8 +26,22 @@ pub enum Geometry {
     Highlight(Vec<Pos2>),
     Line(Pos2, Pos2),
     Arrow(Pos2, Pos2),
+    /// 両端に矢じりのある矢印
+    DoubleArrow(Pos2, Pos2),
+    /// 曲線の矢印。`ctrl` が曲がりを決める制御点(2次ベジェ)
+    CurveArrow {
+        a: Pos2,
+        b: Pos2,
+        ctrl: Pos2,
+    },
     Rect(Pos2, Pos2),
     Ellipse(Pos2, Pos2),
+    /// 対象を左右から挟む括弧。2点が成す矩形の左右の辺に沿って描く
+    Bracket {
+        a: Pos2,
+        b: Pos2,
+        style: BracketStyle,
+    },
     /// `pos` が左上
     Text {
         pos: Pos2,
@@ -41,6 +58,7 @@ pub enum Geometry {
     Number {
         center: Pos2,
         n: u32,
+        style: NumberStyle,
     },
     Mosaic(Pos2, Pos2),
 }
@@ -54,6 +72,58 @@ pub struct Shape {
     pub width: f32,
     /// 文字・番号の大きさ(px)
     pub size: f32,
+}
+
+/// 括弧の種類。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum BracketStyle {
+    /// ( )
+    #[default]
+    Round,
+    /// [ ]
+    Square,
+    /// { }
+    Curly,
+}
+
+impl BracketStyle {
+    pub const ALL: [(BracketStyle, &'static str); 3] = [
+        (BracketStyle::Round, "丸括弧 ( )"),
+        (BracketStyle::Square, "角括弧 [ ]"),
+        (BracketStyle::Curly, "波括弧 { }"),
+    ];
+}
+
+/// 番号マーカーの見た目。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum NumberStyle {
+    /// 塗りつぶした丸に、抜き色の数字
+    #[default]
+    Filled,
+    /// 白地に色の枠と色の数字(塗りの逆)
+    Outline,
+    /// 塗りつぶした四角
+    FilledSquare,
+    /// 白地に色の枠の四角
+    OutlineSquare,
+}
+
+impl NumberStyle {
+    pub const ALL: [(NumberStyle, &'static str); 4] = [
+        (NumberStyle::Filled, "● 丸(塗り)"),
+        (NumberStyle::Outline, "○ 丸(逆)"),
+        (NumberStyle::FilledSquare, "■ 四角(塗り)"),
+        (NumberStyle::OutlineSquare, "□ 四角(逆)"),
+    ];
+
+    pub fn is_square(self) -> bool {
+        matches!(self, NumberStyle::FilledSquare | NumberStyle::OutlineSquare)
+    }
+
+    /// 白地に色の枠(塗りの逆)かどうか。
+    pub fn is_outline(self) -> bool {
+        matches!(self, NumberStyle::Outline | NumberStyle::OutlineSquare)
+    }
 }
 
 /// 吹き出しの輪郭の種類。
@@ -140,20 +210,49 @@ impl Shape {
             }
             Geometry::Arrow(a, b) => {
                 let mut segs = vec![(*a, *b)];
-                let dir = *b - *a;
-                if dir.length() > 1.0 {
-                    let dir = dir.normalized();
-                    let head = (self.width * 4.0).max(14.0);
-                    for sign in [-1.0f32, 1.0] {
-                        let (s, c) = (sign * 25f32.to_radians()).sin_cos();
-                        let rot = vec2(dir.x * c - dir.y * s, dir.x * s + dir.y * c);
-                        segs.push((*b, *b - rot * head));
-                    }
-                }
+                segs.extend(self.arrow_head(*b, *a));
                 segs
             }
+            Geometry::DoubleArrow(a, b) => {
+                let mut segs = vec![(*a, *b)];
+                segs.extend(self.arrow_head(*b, *a));
+                segs.extend(self.arrow_head(*a, *b));
+                segs
+            }
+            Geometry::CurveArrow { a, b, ctrl } => {
+                let pts = quad_points(*a, *ctrl, *b, 40);
+                let mut segs: Vec<(Pos2, Pos2)> = pts.windows(2).map(|w| (w[0], w[1])).collect();
+                // 矢じりは終点での接線の向き(制御点 → 終点)に合わせる
+                segs.extend(self.arrow_head(*b, if (*b - *ctrl).length() > 1.0 { *ctrl } else { *a }));
+                segs
+            }
+            Geometry::Bracket { a, b, style } => bracket_segments(rect_of(*a, *b), *style, self.width),
             _ => vec![],
         }
+    }
+
+    /// 矢じり(開いたV字)の2本の線分。`tip` が先端、`from` は矢の根元側の点(向きの基準)。
+    fn arrow_head(&self, tip: Pos2, from: Pos2) -> Vec<(Pos2, Pos2)> {
+        let dir = tip - from;
+        if dir.length() <= 1.0 {
+            return vec![];
+        }
+        let dir = dir.normalized();
+        let head = (self.width * 4.0).max(14.0);
+        [-1.0f32, 1.0]
+            .iter()
+            .map(|sign| {
+                let (s, c) = (sign * 25f32.to_radians()).sin_cos();
+                let rot = vec2(dir.x * c - dir.y * s, dir.x * s + dir.y * c);
+                (tip, tip - rot * head)
+            })
+            .collect()
+    }
+
+    /// 曲線矢印の、曲線上の中点(ハンドルの位置)。
+    pub fn curve_mid(&self) -> Option<Pos2> {
+        let Geometry::CurveArrow { a, b, ctrl } = &self.geometry else { return None };
+        Some(quad_points(*a, *ctrl, *b, 2)[1])
     }
 
     /// 吹き出し本体の最小の大きさ(文字が収まる大きさ)。
@@ -224,9 +323,13 @@ impl Shape {
             Geometry::Line(a, b) | Geometry::Rect(a, b) | Geometry::Ellipse(a, b) => {
                 rect_of(*a, *b).expand(self.width / 2.0 + 1.0)
             }
-            Geometry::Arrow(a, b) => {
+            Geometry::Arrow(a, b) | Geometry::DoubleArrow(a, b) => {
                 let head = (self.width * 4.0).max(14.0);
                 rect_of(*a, *b).expand(self.width / 2.0 + head + 1.0)
+            }
+            Geometry::CurveArrow { .. } | Geometry::Bracket { .. } => {
+                let pts: Vec<Pos2> = self.segments().iter().flat_map(|(a, b)| [*a, *b]).collect();
+                bounds_of(&pts).expand(self.width / 2.0 + 1.0)
             }
             Geometry::Text { pos, text } => {
                 let sample = if text.is_empty() { "あ" } else { text.as_str() };
@@ -242,8 +345,9 @@ impl Shape {
                 }
                 None => Rect::from_center_size(*center, Vec2::ZERO),
             },
-            Geometry::Number { center, .. } => {
-                Rect::from_center_size(*center, Vec2::splat(self.number_radius() * 2.0 + 2.0))
+            Geometry::Number { center, style, .. } => {
+                let ring = if style.is_outline() { self.width } else { 0.0 };
+                Rect::from_center_size(*center, Vec2::splat(self.number_radius() * 2.0 + 2.0 + ring))
             }
             Geometry::Mosaic(a, b) => rect_of(*a, *b),
         }
@@ -265,11 +369,18 @@ impl Shape {
             Geometry::Pen(pts) | Geometry::Highlight(pts) => pts.iter_mut().for_each(mv),
             Geometry::Line(a, b)
             | Geometry::Arrow(a, b)
+            | Geometry::DoubleArrow(a, b)
             | Geometry::Rect(a, b)
             | Geometry::Ellipse(a, b)
-            | Geometry::Mosaic(a, b) => {
+            | Geometry::Mosaic(a, b)
+            | Geometry::Bracket { a, b, .. } => {
                 mv(a);
                 mv(b);
+            }
+            Geometry::CurveArrow { a, b, ctrl } => {
+                mv(a);
+                mv(b);
+                mv(ctrl);
             }
             Geometry::Text { pos, .. } => mv(pos),
             Geometry::Bubble { center, tail, .. } => {
@@ -296,4 +407,71 @@ pub fn dist_to_segment(p: Pos2, a: Pos2, b: Pos2) -> f32 {
     let len2 = ab.length_sq();
     let t = if len2 <= f32::EPSILON { 0.0 } else { (((p - a).x * ab.x + (p - a).y * ab.y) / len2).clamp(0.0, 1.0) };
     (p - (a + ab * t)).length()
+}
+
+/// 2次ベジェ曲線 `a`→`b`(制御点 `c`)を `n` 分割した点列(両端を含む `n + 1` 点)。
+pub fn quad_points(a: Pos2, c: Pos2, b: Pos2, n: usize) -> Vec<Pos2> {
+    (0..=n)
+        .map(|i| {
+            let t = i as f32 / n as f32;
+            let u = 1.0 - t;
+            pos2(u * u * a.x + 2.0 * u * t * c.x + t * t * b.x, u * u * a.y + 2.0 * u * t * c.y + t * t * b.y)
+        })
+        .collect()
+}
+
+/// 3次ベジェ曲線の点列(両端を含む `n + 1` 点)。
+fn cubic_points(p: [Pos2; 4], n: usize) -> Vec<Pos2> {
+    (0..=n)
+        .map(|i| {
+            let t = i as f32 / n as f32;
+            let u = 1.0 - t;
+            let (w0, w1, w2, w3) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+            pos2(
+                w0 * p[0].x + w1 * p[1].x + w2 * p[2].x + w3 * p[3].x,
+                w0 * p[0].y + w1 * p[1].y + w2 * p[2].y + w3 * p[3].y,
+            )
+        })
+        .collect()
+}
+
+/// 括弧の線分。`r` の左右の辺に沿って、内側へ向けて開く括弧を1組描く。
+fn bracket_segments(r: Rect, style: BracketStyle, width: f32) -> Vec<(Pos2, Pos2)> {
+    if r.width() < 1.0 || r.height() < 1.0 {
+        return vec![];
+    }
+    // 括弧の張り出し(奥行き)。細長い矩形でも、極端に大きくも小さくもならないようにする
+    let depth = (r.height() * 0.12).clamp(width * 2.0 + 6.0, 40.0).min(r.width() / 2.0);
+    let (x0, x1, y0, y1) = (r.min.x, r.max.x, r.min.y, r.max.y);
+    let h = y1 - y0;
+
+    // 左側の括弧を、外側 x = x0・内側 x = x0 + depth の座標で作り、右側は左右反転して作る
+    let left: Vec<Pos2> = match style {
+        BracketStyle::Square => {
+            vec![pos2(x0 + depth, y0), pos2(x0, y0), pos2(x0, y1), pos2(x0 + depth, y1)]
+        }
+        BracketStyle::Round => (0..=24)
+            .map(|i| {
+                let s = i as f32 / 24.0;
+                // 両端で内側、中央で外側へ膨らむ放物線
+                pos2(x0 + depth * (2.0 * s - 1.0).powi(2), y0 + h * s)
+            })
+            .collect(),
+        BracketStyle::Curly => {
+            // 上半分(端 → 中央の尖り)を2本の3次ベジェでつなぎ、下半分は上下反転して作る
+            let at = |u: f32, v: f32| pos2(x0 + depth * (1.0 - u), y0 + h * v);
+            let mut top = cubic_points([at(0.0, 0.0), at(0.5, 0.0), at(0.5, 0.04), at(0.5, 0.14)], 8);
+            top.extend(
+                cubic_points([at(0.5, 0.14), at(0.5, 0.36), at(0.5, 0.44), at(1.0, 0.5)], 10).into_iter().skip(1),
+            );
+            let mut pts = top.clone();
+            pts.extend(top.iter().rev().skip(1).map(|p| pos2(p.x, y0 + y1 - p.y)));
+            pts
+        }
+    };
+    let mirror = |p: &Pos2| pos2(x0 + x1 - p.x, p.y);
+    let right: Vec<Pos2> = left.iter().map(mirror).collect();
+    let mut segs: Vec<(Pos2, Pos2)> = left.windows(2).map(|w| (w[0], w[1])).collect();
+    segs.extend(right.windows(2).map(|w| (w[0], w[1])));
+    segs
 }

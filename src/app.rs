@@ -21,7 +21,7 @@ pub enum Cmd {
 /// 待機中ウィンドウを退避させる画面外座標(物理ピクセル)
 const PARKED: f32 = -32000.0;
 /// 編集画面のツールバー(2段)の高さの目安。ウィンドウの大きさの計算に使う
-const TOOLBAR_H: f32 = 84.0;
+const TOOLBAR_H: f32 = 70.0;
 const STATUS_H: f32 = 28.0;
 const MARGIN: f32 = 8.0;
 
@@ -143,6 +143,9 @@ impl App {
             egui::Grid::new("settings").num_columns(2).spacing([12.0, 10.0]).show(ui, |ui| {
                 ui.label("ホットキー");
                 ui.text_edit_singleline(&mut d.cfg.hotkey);
+                ui.end_row();
+                ui.label("起動");
+                ui.checkbox(&mut d.cfg.autostart, "Windows の起動時に自動で起動する");
                 ui.end_row();
                 ui.label("保存先フォルダ");
                 ui.horizontal(|ui| {
@@ -278,13 +281,17 @@ impl App {
                 d.msg = "保存先を指定してください".into();
             } else {
                 d.cfg.save_dir = clean_path(&d.dir).into();
-                match crate::config::save(&d.cfg) {
-                    Ok(()) => {
-                        self.cfg = d.cfg;
-                        self.go_idle(ctx);
-                        return Mode::Idle;
-                    }
-                    Err(e) => d.msg = format!("INIを保存できません: {e}"),
+                // 自動起動の登録を先に反映する。失敗したら、設定は保存せずに理由を見せる
+                match crate::autostart::sync(d.cfg.autostart) {
+                    Err(e) => d.msg = e,
+                    Ok(()) => match crate::config::save(&d.cfg) {
+                        Ok(()) => {
+                            self.cfg = d.cfg;
+                            self.go_idle(ctx);
+                            return Mode::Idle;
+                        }
+                        Err(e) => d.msg = format!("INIを保存できません: {e}"),
+                    },
                 }
             }
         }
@@ -762,8 +769,9 @@ impl App {
         let ppp = ctx.pixels_per_point();
         let zoom = 1.0 / ppp; // 等倍(1画像ピクセル = 1物理ピクセル)
         let (mon_w, mon_h) = (img.width() as f32 / ppp, img.height() as f32 / ppp);
-        let win_w = (w as f32 * zoom + MARGIN * 2.0).max(900.0).min(mon_w - 80.0);
-        let win_h = (h as f32 * zoom + MARGIN * 2.0 + TOOLBAR_H + STATUS_H).min(mon_h - 80.0);
+        let win_w = (w as f32 * zoom + MARGIN * 2.0).max(980.0).min(mon_w - 80.0);
+        // 左のツールパレット(縦一列)が収まる高さを下限にする
+        let win_h = (h as f32 * zoom + MARGIN * 2.0 + TOOLBAR_H + STATUS_H).max(640.0).min(mon_h - 80.0);
         let origin = vec2(shot.origin.0 as f32 / ppp, shot.origin.1 as f32 / ppp);
         // 確認ウィンドウは撮影したモニタの中央に出す
         let pos = pos2(origin.x + ((mon_w - win_w) / 2.0).max(0.0), origin.y + ((mon_h - win_h) / 2.0).max(0.0));

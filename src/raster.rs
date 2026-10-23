@@ -22,7 +22,14 @@ pub fn draw_shape(img: &mut RgbaImage, shape: &Shape) {
     let c = shape.color.to_srgba_unmultiplied();
     match &shape.geometry {
         Geometry::Highlight(_) => draw_highlight(img, shape, c),
-        Geometry::Pen(_) | Geometry::Line(..) | Geometry::Arrow(..) | Geometry::Rect(..) | Geometry::Ellipse(..) => {
+        Geometry::Pen(_)
+        | Geometry::Line(..)
+        | Geometry::Arrow(..)
+        | Geometry::DoubleArrow(..)
+        | Geometry::CurveArrow { .. }
+        | Geometry::Bracket { .. }
+        | Geometry::Rect(..)
+        | Geometry::Ellipse(..) => {
             let (w, h) = (img.width() as i32, img.height() as i32);
             let r = shape.stroke_width() / 2.0;
             for (a, b) in shape.segments() {
@@ -54,16 +61,35 @@ pub fn draw_shape(img: &mut RgbaImage, shape: &Shape) {
                 text::draw(img, *center - size / 2.0, text, shape.size, c);
             }
         }
-        Geometry::Number { center, n } => {
+        Geometry::Number { center, n, style } => {
             let (center, r) = (*center, shape.number_radius());
-            draw_sdf(img, shape.bounds(), move |p| (p - center).length() - r, Some(c), None);
+            let (square, outline) = (style.is_square(), style.is_outline());
+            // 四角は、丸と同じくらいの見た目の大きさになるよう少し小さめにとる
+            let body = Rect::from_center_size(center, Vec2::splat(r * 1.88));
+            let corner = r * 0.28;
+            let sdf = move |p: Pos2| if square { sd_round_rect(p, body, corner) } else { (p - center).length() - r };
+            if outline {
+                // 塗りの逆: 白地に色の枠
+                draw_sdf(img, shape.bounds(), sdf, Some([255, 255, 255, 255]), Some((shape.width, c)));
+            } else {
+                draw_sdf(img, shape.bounds(), sdf, Some(c), None);
+            }
             let label = n.to_string();
-            let size = text::measure(&label, shape.size);
-            let lum = 0.299 * c[0] as f32 + 0.587 * c[1] as f32 + 0.114 * c[2] as f32;
-            let ink = if lum > 170.0 { [20, 20, 20, 255] } else { [255, 255, 255, 255] };
-            text::draw(img, center - size / 2.0, &label, shape.size, ink);
+            let ink = if outline {
+                c
+            } else {
+                let lum = 0.299 * c[0] as f32 + 0.587 * c[1] as f32 + 0.114 * c[2] as f32;
+                if lum > 170.0 { [20, 20, 20, 255] } else { [255, 255, 255, 255] }
+            };
+            // 行の高さではなく、実際に塗られる字形の範囲を中心に合わせる(数字が上に寄らない)
+            let origin = match text::ink_bounds(&label, shape.size) {
+                Some(b) => center - b.center().to_vec2(),
+                None => center - text::measure(&label, shape.size) / 2.0,
+            };
+            text::draw(img, origin, &label, shape.size, ink);
         }
-        Geometry::Mosaic(a, b) => mosaic(img, Rect::from_two_pos(*a, *b), (shape.width * 3.0).max(6.0) as u32),
+        // モザイクの強度(ブロックの1辺の画素数)は `width` に持つ
+        Geometry::Mosaic(a, b) => mosaic(img, Rect::from_two_pos(*a, *b), shape.width.max(2.0) as u32),
     }
 }
 
@@ -248,7 +274,7 @@ mod tests {
     }
 
     /// 4種類の吹き出しが描画でき、背景が白以外になる(輪郭と文字が塗られる)ことを確かめる。
-    /// 環境変数 `SS_TEST_OUT` にパスを渡すと、目視用に PNG も書き出す。
+    /// 環境変数 `SS_TEST_DIR` にフォルダを渡すと、目視用に PNG も書き出す。
     #[test]
     fn bubble_styles_render() {
         let base = RgbaImage::from_pixel(1000, 260, image::Rgba([240, 240, 240, 255]));
@@ -260,8 +286,59 @@ mod tests {
         let out = render(&base, &shapes);
         let painted = out.pixels().filter(|p| p.0 != [240, 240, 240, 255]).count();
         assert!(painted > 5000, "bubbles were not drawn: {painted}");
-        if let Some(path) = std::env::var_os("SS_TEST_OUT") {
-            out.save(path).unwrap();
+        save_for_review(&out, "bubbles.png");
+    }
+
+    fn save_for_review(img: &RgbaImage, name: &str) {
+        if let Some(dir) = std::env::var_os("SS_TEST_DIR") {
+            img.save(std::path::Path::new(&dir).join(name)).unwrap();
         }
+    }
+
+    fn plain(geometry: Geometry, width: f32) -> Shape {
+        Shape { geometry, color: Color32::from_rgb(220, 40, 40), width, size: 28.0 }
+    }
+
+    /// 括弧・両矢印・曲線矢印・番号の各表現・モザイクの強度が描画できることを確かめる。
+    #[test]
+    fn new_shapes_render() {
+        use crate::shapes::{BracketStyle, NumberStyle};
+        // モザイクの強度の違いが見えるよう、細かい模様(3px)と粗い模様(24px)を重ねた背景にする
+        let base = RgbaImage::from_fn(1000, 420, |x, y| {
+            let fine = (x / 3 + y / 3) % 2 == 0;
+            let coarse = (x / 24 + y / 24) % 2 == 0;
+            let v = match (fine, coarse) {
+                (true, true) => 30,
+                (false, true) => 120,
+                (true, false) => 160,
+                (false, false) => 235,
+            };
+            image::Rgba([v, v, v, 255])
+        });
+        let mut shapes = Vec::new();
+        for (i, style) in [BracketStyle::Round, BracketStyle::Square, BracketStyle::Curly].into_iter().enumerate() {
+            let x = 40.0 + i as f32 * 150.0;
+            shapes.push(plain(Geometry::Bracket { a: pos2(x, 30.0), b: pos2(x + 110.0, 150.0), style }, 4.0));
+        }
+        shapes.push(plain(Geometry::DoubleArrow(pos2(500.0, 60.0), pos2(700.0, 60.0)), 4.0));
+        shapes.push(plain(
+            Geometry::CurveArrow { a: pos2(500.0, 150.0), b: pos2(720.0, 150.0), ctrl: pos2(610.0, 60.0) },
+            4.0,
+        ));
+        for (i, (style, _)) in NumberStyle::ALL.iter().enumerate() {
+            shapes.push(plain(
+                Geometry::Number { center: pos2(60.0 + i as f32 * 90.0, 250.0), n: i as u32 + 1, style: *style },
+                4.0,
+            ));
+        }
+        // 同じ範囲の幅で、強度だけ変えたモザイク
+        for (i, block) in [6.0f32, 14.0, 30.0].into_iter().enumerate() {
+            let x = 460.0 + i as f32 * 170.0;
+            shapes.push(plain(Geometry::Mosaic(pos2(x, 220.0), pos2(x + 150.0, 400.0)), block));
+        }
+        let out = render(&base, &shapes);
+        save_for_review(&out, "shapes.png");
+        let painted = out.pixels().zip(base.pixels()).filter(|(a, b)| a != b).count();
+        assert!(painted > 20_000, "shapes were not drawn: {painted}");
     }
 }
