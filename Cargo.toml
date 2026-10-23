@@ -1,6 +1,6 @@
 [package]
 name = "snapmark"
-version = "0.7.3"
+version = "0.7.4"
 license = "Apache-2.0"
 repository = "https://github.com/glasssoundforest-lab/screenshot-tool"
 edition = "2024"

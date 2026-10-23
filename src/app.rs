@@ -588,7 +588,8 @@ impl App {
             let rect = ui.max_rect();
             screen = rect;
             let resp = ui.allocate_rect(rect, Sense::click_and_drag());
-            ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+            // OS のカーソルは隠し、画面いっぱいに伸びる細い十字線を代わりに描く
+            ui.ctx().set_cursor_icon(CursorIcon::None);
             let painter = ui.painter();
             painter.image(
                 s.tex.id(),
@@ -596,6 +597,16 @@ impl App {
                 Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
                 Color32::WHITE,
             );
+            if let Some(c) = ui.input(|i| i.pointer.latest_pos()).filter(|c| rect.contains(*c)) {
+                // 明るい背景でも暗い背景でも見えるよう、暗い線の上に細い白線を重ねる
+                let ppp = ui.ctx().pixels_per_point();
+                let c = pos2((c.x * ppp).floor() / ppp + 0.5 / ppp, (c.y * ppp).floor() / ppp + 0.5 / ppp);
+                for (w, color) in [(3.0 / ppp, Color32::from_black_alpha(150)), (1.0 / ppp, Color32::WHITE)] {
+                    let stroke = Stroke::new(w, color);
+                    painter.hline(rect.x_range(), c.y, stroke);
+                    painter.vline(c.x, rect.y_range(), stroke);
+                }
+            }
 
             // ルーペの位置。Shift を押している間は逃げず、ドラッグで動かせる。
             let cur = ui.input(|i| i.pointer.latest_pos());
