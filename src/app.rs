@@ -699,7 +699,6 @@ impl App {
             if let Some(el) = &elem_hover {
                 let r = Rect::from_min_max(to_pt(el.rect.0, el.rect.1), to_pt(el.rect.2, el.rect.3)).intersect(rect);
                 let green = Color32::from_rgb(0, 200, 120);
-                painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(0, 200, 120, 45));
                 painter.rect_stroke(r, 0.0, Stroke::new(5.0, Color32::from_black_alpha(150)), egui::StrokeKind::Inside);
                 painter.rect_stroke(r, 0.0, Stroke::new(3.0, green), egui::StrokeKind::Inside);
                 let name: String = el.name.chars().take(40).collect();
@@ -737,7 +736,6 @@ impl App {
             if let Some(i) = hover_win {
                 let w = &s.windows[i];
                 let r = Rect::from_min_max(to_pt(w.rect.0, w.rect.1), to_pt(w.rect.2, w.rect.3)).intersect(rect);
-                painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(0, 160, 255, 45));
                 painter.rect_stroke(r, 0.0, Stroke::new(5.0, Color32::from_black_alpha(150)), egui::StrokeKind::Inside);
                 painter.rect_stroke(r, 0.0, Stroke::new(3.0, Color32::from_rgb(0, 160, 255)), egui::StrokeKind::Inside);
                 let title: String = w.title.chars().take(40).collect();
