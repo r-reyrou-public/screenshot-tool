@@ -47,6 +47,15 @@ pub fn open_in_explorer(dir: &std::path::Path) {
     }
 }
 
+/// 既定のブラウザで、このツールのリリースページ(GitHub)を開く。それ以外の URL は開かない。
+pub fn open_release_page() {
+    let Some(exe) = windows_dir().map(|d| d.join("explorer.exe")) else { return };
+    let url = crate::update::release_page();
+    if url.starts_with("https://github.com/") {
+        let _ = std::process::Command::new(exe).arg(url).spawn();
+    }
+}
+
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -54,7 +63,7 @@ fn wide(s: &str) -> Vec<u16> {
 /// コンソールの無いリリース版でもエラーが分かるよう、メッセージボックスで知らせる。
 pub fn error_box(text: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
-    let (text, title) = (wide(text), wide("スクショツール"));
+    let (text, title) = (wide(text), wide("SnapMark"));
     // SAFETY: どちらも NUL 終端済みの UTF-16。親ウィンドウは無し
     unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), MB_OK | MB_ICONERROR) };
 }
@@ -64,7 +73,7 @@ pub fn error_box(text: &str) {
 pub fn acquire_single_instance() -> bool {
     use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
     use windows_sys::Win32::System::Threading::CreateMutexW;
-    let name = wide("Local\\ScreenshotTool-single-instance");
+    let name = wide("Local\\SnapMark-single-instance");
     // SAFETY: name は NUL 終端済み。直後に GetLastError を読む
     unsafe {
         let handle = CreateMutexW(std::ptr::null(), 0, name.as_ptr());

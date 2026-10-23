@@ -39,13 +39,19 @@ pub struct Config {
     pub autostart: bool,
     /// 見た目のかたまり検出で、同じかたまりとみなす隙間の大きさ(px)。大きいほど大きなかたまりになる
     pub visual_gap: u32,
+    /// 数日に1回、新しい版が出ていないか GitHub に問い合わせる
+    pub update_check: bool,
+    /// 最後に問い合わせた時刻(UNIX 秒)。INI は手で書き換えない前提の内部用
+    pub last_update_check: u64,
+    /// 問い合わせで分かった最新の版(空なら未確認)
+    pub latest_version: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             hotkey: "ctrl+shift+s".into(),
-            save_dir: dirs::picture_dir().unwrap_or_else(|| PathBuf::from(".")).join("ScreenshotTool"),
+            save_dir: dirs::picture_dir().unwrap_or_else(|| PathBuf::from(".")).join("SnapMark"),
             format: "png".into(),
             name_pattern: "Screenshot_%Y%m%d_%H%M%S".into(),
             jpeg_quality: 90,
@@ -63,6 +69,9 @@ impl Default for Config {
             element_detail_key: "D".into(),
             visual_gap: 14,
             autostart: false,
+            update_check: true,
+            last_update_check: 0,
+            latest_version: String::new(),
         }
     }
 }
@@ -77,8 +86,8 @@ impl Config {
 pub fn ini_path() -> PathBuf {
     std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("ScreenshotTool.ini")))
-        .unwrap_or_else(|| PathBuf::from("ScreenshotTool.ini"))
+        .and_then(|p| p.parent().map(|d| d.join("SnapMark.ini")))
+        .unwrap_or_else(|| PathBuf::from("SnapMark.ini"))
 }
 
 fn parse(text: &str) -> Config {
@@ -107,6 +116,9 @@ fn parse(text: &str) -> Config {
             "element_snap_key" => cfg.element_snap_key = v.into(),
             "element_detail_key" => cfg.element_detail_key = v.into(),
             "autostart" => cfg.autostart = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"),
+            "update_check" => cfg.update_check = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"),
+            "last_update_check" => cfg.last_update_check = v.parse().unwrap_or(0),
+            "latest_version" if v.len() <= 32 => cfg.latest_version = v.into(),
             "visual_gap" => cfg.visual_gap = v.parse().unwrap_or(cfg.visual_gap).clamp(4, 60),
             "loupe_offset_x" => cfg.loupe_offset_x = v.parse().unwrap_or(cfg.loupe_offset_x).min(4000),
             "loupe_offset_y" => cfg.loupe_offset_y = v.parse().unwrap_or(cfg.loupe_offset_y).min(4000),
@@ -116,9 +128,20 @@ fn parse(text: &str) -> Config {
     cfg
 }
 
+/// 旧名称(ScreenshotTool)の INI が残っていて新しい INI が無ければ、名前を付け替えて設定を引き継ぐ。
+fn migrate_legacy_ini(path: &std::path::Path) {
+    if let Some(dir) = path.parent() {
+        let old = dir.join("ScreenshotTool.ini");
+        if !path.exists() && old.is_file() {
+            let _ = std::fs::rename(old, path);
+        }
+    }
+}
+
 /// INI を読み込む。無ければ既定値で作成する。
 pub fn load() -> Config {
     let path = ini_path();
+    migrate_legacy_ini(&path);
     match std::fs::read_to_string(&path) {
         Ok(text) => parse(&text),
         Err(_) => {
@@ -138,6 +161,11 @@ pub fn save(cfg: &Config) -> std::io::Result<()> {
          hotkey={}\r\n\
          ; Windows の起動時にこのツールも自動で起動する 1=ON 0=OFF\r\n\
          autostart={}\r\n\
+         ; 数日に1回、新しい版が出ていないか GitHub に問い合わせる 1=ON 0=OFF\r\n\
+         update_check={}\r\n\
+         ; 以下の2つは更新確認が自動で書き込む(手で変えなくてよい)\r\n\
+         last_update_check={}\r\n\
+         latest_version={}\r\n\
          \r\n\
          [Output]\r\n\
          ; 保存先フォルダ\r\n\
@@ -180,6 +208,9 @@ pub fn save(cfg: &Config) -> std::io::Result<()> {
          visual_gap={}\r\n",
         cfg.hotkey,
         if cfg.autostart { 1 } else { 0 },
+        if cfg.update_check { 1 } else { 0 },
+        cfg.last_update_check,
+        cfg.latest_version,
         cfg.save_dir.display(),
         cfg.format,
         cfg.name_pattern,

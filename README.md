@@ -1,4 +1,6 @@
-# スクショツール (screenshot-tool)
+# SnapMark(スナップマーク)
+
+<img src="assets/icon.png" width="96" alt="SnapMark">
 
 Windows 向けの、常駐型スクリーンショット&注釈ツールです。Rust と [egui](https://github.com/emilk/egui) で作っています。
 
@@ -32,27 +34,54 @@ Windows 向けの、常駐型スクリーンショット&注釈ツールです�
 
 ## 設定
 
-実行ファイルと同じフォルダの `ScreenshotTool.ini` に保存されます(初回起動時に自動作成)。
+実行ファイルと同じフォルダの `SnapMark.ini` に保存されます(初回起動時に自動作成)。
 トレイメニューの「設定...」から画面で変更できます。ホットキーの変更は再起動後に反映されます。
 
 **Windows 起動時の自動起動**を設定できます(現在のユーザーのスタートアップフォルダに、このツール専用のショートカットを1つだけ置きます。管理者権限は不要で、Windows の「スタートアップ アプリ」にも表示されます。オフにするとショートカットを消します)。
 
-## ビルド
+## アップデートの確認
 
-Rust(2024 edition 対応の安定版)と Windows が必要です。
+数日に1回(3日ごと)、撮影や設定を開いたときに、バックグラウンドで GitHub の最新リリースを問い合わせ、新しい版があれば、
+タスクトレイのアイコンに赤い点のバッジを付け、トレイメニューと設定画面で案内します
+(「ダウンロードページを開く」でこのリポジトリのリリースページが開きます)。自動ダウンロード・自動更新はしません。
+通信は OS 標準の WinHTTP で、版番号を読むだけです。設定画面の「数日に1回、新しい版を確認する」で切れます。
+
+## ダウンロード
+
+[Releases](https://github.com/glasssoundforest-lab/screenshot-tool/releases) から `snapmark.exe` を入手できます。
+インストール不要で、好きなフォルダに置いて実行します(設定の INI は exe と同じフォルダに作られます)。
+
+## ビルド方法
+
+### 必要なもの
+
+- Windows 10 / 11
+- Rust(2024 edition に対応した最近の安定版)— [rustup](https://rustup.rs/) で入れられます
+- MSVC ビルドツール(Visual Studio Build Tools の「C++ によるデスクトップ開発」)と Windows SDK
+  - exe にアイコンとバージョン情報を埋め込むために、Windows SDK の `rc.exe` を使います
+    (見つからない場合も警告だけでビルドは通りますが、アイコンは付きません)
+
+### 手順
 
 ```
+git clone https://github.com/glasssoundforest-lab/screenshot-tool.git
+cd screenshot-tool
 cargo build --release
 ```
 
-`target/release/screenshot-tool.exe` ができます。
+`target/release/snapmark.exe` ができます。開発中の実行は `cargo run` でできます。
 
-テストと静的解析:
+### テストと静的解析
 
 ```
 cargo test
 cargo clippy --all-targets
+cargo test -- --ignored   # 実際にスタートアップフォルダや GitHub へ触る確認(手元でのみ実行)
 ```
+
+## ライセンス
+
+[Apache License 2.0](LICENSE)
 
 ## 注意
 

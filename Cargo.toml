@@ -1,8 +1,10 @@
 [package]
-name = "screenshot-tool"
-version = "0.6.0"
+name = "snapmark"
+version = "0.6.5"
+license = "Apache-2.0"
+repository = "https://github.com/glasssoundforest-lab/screenshot-tool"
 edition = "2024"
-description = "Windows 向けの常駐型スクリーンショット&注釈ツール(egui)"
+description = "Windows 向けの常駐型スクリーンショット&注釈ツール SnapMark (egui)"
 readme = "README.md"
 publish = false
 
@@ -21,7 +23,7 @@ rfd = "0.17.2"
 tray-icon = "0.26.1"
 windows = { version = "0.62.2", features = ["Win32_UI_Accessibility", "Win32_System_Com", "Win32_Foundation", "Win32_UI_Shell", "Win32_Storage_FileSystem"] }
 windows-core = "0.62"
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Security", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Networking_WinHttp", "Win32_Security", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 xcap = "0.9.8"
 
 [profile.release]

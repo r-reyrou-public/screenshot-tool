@@ -1,7 +1,7 @@
 //! Windows 起動時の自動起動(スタートアップフォルダへのショートカット)。
 //!
 //! 管理者権限は要らず、現在のユーザーのスタートアップフォルダに、このツール専用のショートカット
-//! (`ScreenshotTool.lnk`)を1つ置く/消すだけ。他のアプリのショートカットには触れない。
+//! (`SnapMark.lnk`)を1つ置く/消すだけ。他のアプリのショートカットには触れない。
 //! 設定アプリの「スタートアップ アプリ」にも表示され、そこからも切れる。
 
 use std::path::{Path, PathBuf};
@@ -12,7 +12,9 @@ use windows::Win32::System::Com::{
 use windows::Win32::UI::Shell::{FOLDERID_Startup, IShellLinkW, KF_FLAG_DEFAULT, SHGetKnownFolderPath, ShellLink};
 use windows::core::{HSTRING, Interface};
 
-const LINK_NAME: &str = "ScreenshotTool.lnk";
+const LINK_NAME: &str = "SnapMark.lnk";
+/// 旧名称(ScreenshotTool)で作ったショートカット。見つかれば消して、二重起動の元を断つ
+const LEGACY_LINK_NAME: &str = "ScreenshotTool.lnk";
 
 /// 現在のユーザーのスタートアップフォルダ。
 fn startup_dir() -> Result<PathBuf, String> {
@@ -63,7 +65,7 @@ fn create_link(link: &Path, exe: &Path) -> Result<(), String> {
         if let Some(dir) = exe.parent() {
             shell_link.SetWorkingDirectory(&HSTRING::from(dir.as_os_str())).map_err(|e| e.to_string())?;
         }
-        shell_link.SetDescription(&HSTRING::from("Screenshot Tool")).map_err(|e| e.to_string())?;
+        shell_link.SetDescription(&HSTRING::from("SnapMark")).map_err(|e| e.to_string())?;
         let file: IPersistFile = shell_link.cast().map_err(|e| e.to_string())?;
         file.Save(&HSTRING::from(link.as_os_str()), true).map_err(|e| format!("ショートカットを保存できません: {e}"))
     }
@@ -74,6 +76,9 @@ fn create_link(link: &Path, exe: &Path) -> Result<(), String> {
 pub fn sync(enabled: bool) -> Result<(), String> {
     init_com();
     let link = link_path()?;
+    if let Some(old) = link.parent().map(|d| d.join(LEGACY_LINK_NAME)) {
+        let _ = std::fs::remove_file(old);
+    }
     if enabled {
         let exe = std::env::current_exe().map_err(|e| format!("実行ファイルの場所を取得できません: {e}"))?;
         let up_to_date = current_target(&link).is_some_and(|t| t == exe);

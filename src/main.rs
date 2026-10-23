@@ -10,13 +10,14 @@ mod output;
 mod raster;
 mod shapes;
 mod text;
+mod update;
 mod uia;
 mod visual;
 mod winlist;
 mod winutil;
 
 use anyhow::{Result, anyhow};
-use app::{App, Cmd};
+use app::{App, Cmd, Tray};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use std::sync::{Arc, mpsc};
 use tray_icon::{
@@ -24,18 +25,33 @@ use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
 };
 
-fn tray_icon_image() -> Option<Icon> {
-    const N: u32 = 32;
-    let mut rgba = Vec::with_capacity((N * N * 4) as usize);
-    for y in 0..N {
-        for x in 0..N {
-            // 青地に白いファインダー枠
-            let edge = x.min(y).min(N - 1 - x).min(N - 1 - y);
-            let px = if (5..=7).contains(&edge) { [255, 255, 255, 255] } else { [30, 120, 230, 255] };
-            rgba.extend_from_slice(&px);
+/// トレイ・ウィンドウ用のアイコン(assets/icon.png)。`badge` が真なら、右上に赤い点(更新あり)を重ねる。
+fn app_icon_rgba(badge: bool) -> Option<(Vec<u8>, u32, u32)> {
+    let img = image::load_from_memory_with_format(include_bytes!("../assets/icon.png"), image::ImageFormat::Png).ok()?;
+    let mut img = img.into_rgba8();
+    let (w, h) = img.dimensions();
+    if badge {
+        let (r, cx, cy) = (w as f32 * 0.24, w as f32 * 0.76, h as f32 * 0.24);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
+            if d <= r {
+                *px = image::Rgba([235, 30, 30, 255]);
+            } else if d <= r + w as f32 * 0.04 {
+                *px = image::Rgba([255, 255, 255, 255]);
+            }
         }
     }
-    Icon::from_rgba(rgba, N, N).ok()
+    Some((img.into_raw(), w, h))
+}
+
+pub fn tray_icon_image(badge: bool) -> Option<Icon> {
+    let (rgba, w, h) = app_icon_rgba(badge)?;
+    Icon::from_rgba(rgba, w, h).ok()
+}
+
+fn window_icon() -> egui::IconData {
+    let (rgba, width, height) = app_icon_rgba(false).unwrap_or((vec![0; 4], 1, 1));
+    egui::IconData { rgba, width, height }
 }
 
 fn setup_fonts(ctx: &egui::Context) {
@@ -74,7 +90,8 @@ fn run() -> Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("スクショ編集")
+            .with_title("SnapMark")
+            .with_icon(window_icon())
             .with_decorations(false)
             .with_transparent(true)
             .with_inner_size([1.0, 1.0])
@@ -84,7 +101,7 @@ fn run() -> Result<()> {
 
     let app_cfg = cfg.clone();
     eframe::run_native(
-        "screenshot-tool",
+        "snapmark",
         options,
         Box::new(move |cc| {
             setup_fonts(&cc.egui_ctx);
@@ -108,6 +125,7 @@ fn run() -> Result<()> {
             let capture_item = MenuItem::new("撮影", true, None);
             let folder_item = MenuItem::new("保存フォルダを開く", true, None);
             let config_item = MenuItem::new("設定...", true, None);
+            let update_item = MenuItem::new("", false, None);
             let quit_item = MenuItem::new("終了", true, None);
             menu.append_items(&[
                 &capture_item,
@@ -115,10 +133,16 @@ fn run() -> Result<()> {
                 &folder_item,
                 &config_item,
                 &PredefinedMenuItem::separator(),
+                &update_item,
                 &quit_item,
             ])?;
-            let ids =
-                (capture_item.id().clone(), folder_item.id().clone(), config_item.id().clone(), quit_item.id().clone());
+            let ids = (
+                capture_item.id().clone(),
+                folder_item.id().clone(),
+                config_item.id().clone(),
+                quit_item.id().clone(),
+                update_item.id().clone(),
+            );
             {
                 let (tx, ctx) = (tx.clone(), cc.egui_ctx.clone());
                 MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
@@ -130,6 +154,8 @@ fn run() -> Result<()> {
                         let _ = tx.send(Cmd::Settings);
                     } else if e.id == ids.3 {
                         let _ = tx.send(Cmd::Quit);
+                    } else if e.id == ids.4 {
+                        let _ = tx.send(Cmd::OpenUpdatePage);
                     }
                     ctx.request_repaint();
                 }));
@@ -149,17 +175,16 @@ fn run() -> Result<()> {
             let mut tray = TrayIconBuilder::new()
                 .with_menu(Box::new(menu))
                 .with_menu_on_left_click(false)
-                .with_tooltip("スクショツール");
-            if let Some(icon) = tray_icon_image() {
+                .with_tooltip("SnapMark");
+            if let Some(icon) = tray_icon_image(false) {
                 tray = tray.with_icon(icon);
             }
-            let tray = tray.build()?;
+            let tray = Tray { icon: tray.build()?, update_item };
 
-            // ホットキーとトレイはアプリが生きている間ずっと保持する
+            // ホットキーはアプリが生きている間ずっと保持する
             std::mem::forget(manager);
-            std::mem::forget(tray);
 
-            Ok(Box::new(App::new(app_cfg, rx)))
+            Ok(Box::new(App::new(app_cfg, rx, tx, tray)))
         }),
     )
     .map_err(|e| anyhow!("{e}"))

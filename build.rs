@@ -6,10 +6,11 @@ fn main() {
         return;
     }
     let mut res = winresource::WindowsResource::new();
-    res.set("ProductName", "Screenshot Tool")
+    res.set_icon("assets/icon.ico");
+    res.set("ProductName", "SnapMark")
         .set("FileDescription", "Resident screenshot and annotation tool")
-        .set("InternalName", "screenshot-tool")
-        .set("OriginalFilename", "screenshot-tool.exe");
+        .set("InternalName", "snapmark")
+        .set("OriginalFilename", "snapmark.exe");
     // 管理者権限は要求しない。高DPI・長いパス・UTF-8 に対応する
     res.set_manifest(
         r#"<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">

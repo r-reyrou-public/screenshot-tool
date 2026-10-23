@@ -8,14 +8,45 @@ use egui::{
     Color32, ColorImage, Context, CursorIcon, Key, Modifiers, Pos2, Rect, Sense, Stroke, TextureHandle, TextureOptions,
     ViewportCommand, WindowLevel, pos2, vec2,
 };
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
 pub enum Cmd {
     Capture,
     Settings,
     OpenFolder,
+    /// 更新確認の結果。最新の版が分かれば `Some`
+    UpdateChecked(Option<String>),
+    /// 新しい版のリリースページを開く
+    OpenUpdatePage,
     Quit,
+}
+
+/// タスクトレイのアイコンとメニュー項目。更新があるときにバッジと案内を出すために、アプリが持つ。
+pub struct Tray {
+    pub icon: tray_icon::TrayIcon,
+    pub update_item: tray_icon::menu::MenuItem,
+}
+
+impl Tray {
+    fn show_update(&self, version: Option<&str>) {
+        let tip = match version {
+            Some(v) => format!("SnapMark - 新しい版 v{v} があります"),
+            None => "SnapMark".to_string(),
+        };
+        let _ = self.icon.set_tooltip(Some(tip));
+        let _ = self.icon.set_icon(crate::tray_icon_image(version.is_some()));
+        match version {
+            Some(v) => {
+                self.update_item.set_text(format!("● 新しい版 v{v} があります(ダウンロード...)"));
+                self.update_item.set_enabled(true);
+            }
+            None => {
+                self.update_item.set_text(format!("SnapMark v{}(最新)", crate::update::current_version()));
+                self.update_item.set_enabled(false);
+            }
+        }
+    }
 }
 
 /// 待機中ウィンドウを退避させる画面外座標(物理ピクセル)
@@ -97,11 +128,50 @@ pub struct App {
     /// UI Automation(要素検出)。最初に必要になったときに作る
     uia: Option<Uia>,
     quitting: bool,
+    tray: Tray,
+    /// 新しい版があるときの版番号。あればトレイと設定画面でバッジ表示する
+    update: Option<String>,
+    /// 更新確認の通信中
+    checking: bool,
+    tx: Sender<Cmd>,
 }
 
 impl App {
-    pub fn new(cfg: Config, rx: Receiver<Cmd>) -> Self {
-        Self { cfg, rx, mode: Mode::Idle, pending_capture: None, pending_window: None, uia: None, quitting: false }
+    pub fn new(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, tray: Tray) -> Self {
+        let mut app = Self {
+            cfg,
+            rx,
+            mode: Mode::Idle,
+            pending_capture: None,
+            pending_window: None,
+            uia: None,
+            quitting: false,
+            tray,
+            update: None,
+            checking: false,
+            tx,
+        };
+        app.refresh_update_badge();
+        app
+    }
+
+    /// 記録している最新版と、いま動いている版を比べて、バッジ表示を合わせる。
+    fn refresh_update_badge(&mut self) {
+        self.update = crate::update::newer_than_current(&self.cfg.latest_version);
+        self.tray.show_update(self.update.as_deref());
+    }
+
+    /// 更新確認の時期が来ていれば、バックグラウンドで GitHub に問い合わせる。
+    fn maybe_check_update(&mut self, ctx: &Context) {
+        if !self.cfg.update_check || self.checking || !crate::update::is_due(self.cfg.last_update_check) {
+            return;
+        }
+        self.checking = true;
+        let (tx, ctx) = (self.tx.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(Cmd::UpdateChecked(crate::update::check_latest()));
+            ctx.request_repaint();
+        });
     }
 
     /// 常駐中のウィンドウは画面外の 1x1 に退避させる(非表示にすると再描画が止まるため)。
@@ -115,6 +185,7 @@ impl App {
     }
 
     fn open_settings(&mut self, ctx: &Context) {
+        self.maybe_check_update(ctx);
         self.pending_capture = None;
         self.mode = Mode::Settings(SettingsDraft {
             dir: self.cfg.save_dir.display().to_string(),
@@ -146,6 +217,24 @@ impl App {
                 ui.end_row();
                 ui.label("起動");
                 ui.checkbox(&mut d.cfg.autostart, "Windows の起動時に自動で起動する");
+                ui.end_row();
+                ui.label("更新");
+                ui.vertical(|ui| {
+                    ui.checkbox(&mut d.cfg.update_check, "数日に1回、新しい版を確認する");
+                    match &self.update {
+                        Some(v) => {
+                            ui.horizontal(|ui| {
+                                ui.colored_label(Color32::from_rgb(235, 60, 60), format!("● 新しい版 v{v} があります"));
+                                if ui.button("ダウンロードページを開く").clicked() {
+                                    crate::winutil::open_release_page();
+                                }
+                            });
+                        }
+                        None => {
+                            ui.weak(format!("現在の版: v{}", crate::update::current_version()));
+                        }
+                    }
+                });
                 ui.end_row();
                 ui.label("保存先フォルダ");
                 ui.horizontal(|ui| {
@@ -281,12 +370,16 @@ impl App {
                 d.msg = "保存先を指定してください".into();
             } else {
                 d.cfg.save_dir = clean_path(&d.dir).into();
+                // 更新確認の記録は、設定画面を開いている間に更新されていることがあるので引き継ぐ
+                d.cfg.last_update_check = self.cfg.last_update_check;
+                d.cfg.latest_version = self.cfg.latest_version.clone();
                 // 自動起動の登録を先に反映する。失敗したら、設定は保存せずに理由を見せる
                 match crate::autostart::sync(d.cfg.autostart) {
                     Err(e) => d.msg = e,
                     Ok(()) => match crate::config::save(&d.cfg) {
                         Ok(()) => {
                             self.cfg = d.cfg;
+                            self.refresh_update_badge();
                             self.go_idle(ctx);
                             return Mode::Idle;
                         }
@@ -305,6 +398,8 @@ impl App {
     /// 撮影要求。待機中なら即座に撮る。編集・設定ウィンドウが開いている場合だけ、
     /// 写り込まないよう退避してから少し待つ。
     fn request_capture(&mut self, ctx: &Context) {
+        // 起動中に勝手に通信はせず、ユーザーが撮影・設定を操作したときに、時期が来ていれば確認する
+        self.maybe_check_update(ctx);
         if matches!(self.mode, Mode::Idle) {
             self.begin_selection(ctx);
         } else {
@@ -778,7 +873,7 @@ impl App {
 
         ctx.send_viewport_cmd(ViewportCommand::WindowLevel(WindowLevel::Normal));
         ctx.send_viewport_cmd(ViewportCommand::Decorations(true));
-        ctx.send_viewport_cmd(ViewportCommand::Title("スクショ編集".into()));
+        ctx.send_viewport_cmd(ViewportCommand::Title("SnapMark".into()));
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(win_w, win_h)));
         ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
         ctx.send_viewport_cmd(ViewportCommand::Focus);
@@ -967,6 +1062,19 @@ impl eframe::App for App {
                     let _ = std::fs::create_dir_all(&self.cfg.save_dir);
                     crate::winutil::open_in_explorer(&self.cfg.save_dir);
                 }
+                Cmd::UpdateChecked(latest) => {
+                    self.checking = false;
+                    // 通信に失敗したときは時刻を更新せず、次の合図でやり直す
+                    if let Some(v) = latest {
+                        self.cfg.last_update_check = crate::update::now_secs();
+                        self.cfg.latest_version = v;
+                        if let Err(e) = crate::config::save(&self.cfg) {
+                            eprintln!("ini write failed: {e}");
+                        }
+                        self.refresh_update_badge();
+                    }
+                }
+                Cmd::OpenUpdatePage => crate::winutil::open_release_page(),
                 Cmd::Quit => {
                     self.quitting = true;
                     ctx.send_viewport_cmd(ViewportCommand::Close);
