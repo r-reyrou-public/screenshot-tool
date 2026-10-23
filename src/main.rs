@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod album;
 mod app;
 mod autostart;
 mod capture;
@@ -123,6 +124,7 @@ fn run() -> Result<()> {
             // タスクトレイ
             let menu = Menu::new();
             let capture_item = MenuItem::new("撮影", true, None);
+            let album_item = MenuItem::new("アルバム...", true, None);
             let folder_item = MenuItem::new("保存フォルダを開く", true, None);
             let config_item = MenuItem::new("設定...", true, None);
             let update_item = MenuItem::new("", false, None);
@@ -130,6 +132,7 @@ fn run() -> Result<()> {
             menu.append_items(&[
                 &capture_item,
                 &PredefinedMenuItem::separator(),
+                &album_item,
                 &folder_item,
                 &config_item,
                 &PredefinedMenuItem::separator(),
@@ -142,6 +145,7 @@ fn run() -> Result<()> {
                 config_item.id().clone(),
                 quit_item.id().clone(),
                 update_item.id().clone(),
+                album_item.id().clone(),
             );
             {
                 let (tx, ctx) = (tx.clone(), cc.egui_ctx.clone());
@@ -154,6 +158,8 @@ fn run() -> Result<()> {
                         let _ = tx.send(Cmd::Settings);
                     } else if e.id == ids.3 {
                         let _ = tx.send(Cmd::Quit);
+                    } else if e.id == ids.5 {
+                        let _ = tx.send(Cmd::Album);
                     } else if e.id == ids.4 {
                         let _ = tx.send(Cmd::OpenUpdatePage);
                     }
@@ -183,6 +189,11 @@ fn run() -> Result<()> {
 
             // ホットキーはアプリが生きている間ずっと保持する
             std::mem::forget(manager);
+
+            // `--album` で起動すると、最初にアルバムを開く
+            if std::env::args().skip(1).any(|a| a == "--album") {
+                let _ = tx.send(Cmd::Album);
+            }
 
             Ok(Box::new(App::new(app_cfg, rx, tx, tray)))
         }),

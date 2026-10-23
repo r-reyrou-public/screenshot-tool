@@ -1,3 +1,4 @@
+use crate::album::{self, Album};
 use crate::capture::{self, Shot};
 use crate::config::Config;
 use crate::editor::{Editor, Outcome};
@@ -14,6 +15,7 @@ use std::time::{Duration, Instant};
 pub enum Cmd {
     Capture,
     Settings,
+    Album,
     OpenFolder,
     /// 更新確認の結果。最新の版が分かれば `Some`
     UpdateChecked(Option<String>),
@@ -94,19 +96,24 @@ fn clean_path(s: &str) -> String {
 }
 
 const SETTINGS_SIZE: egui::Vec2 = vec2(600.0, 800.0);
+const ALBUM_SIZE: egui::Vec2 = vec2(1040.0, 720.0);
 
-/// 設定ウィンドウをカーソルのあるモニタの中央に置く。
-fn center_settings(ctx: &Context) {
+/// ウィンドウを、カーソルのあるモニタの中央に置く。
+fn center_window(ctx: &Context, size: egui::Vec2) {
     let ppp = ctx.pixels_per_point();
     let pos = match capture::cursor_monitor_rect() {
         Some((x, y, w, h)) => pos2(
-            (x as f32 + (w as f32 - SETTINGS_SIZE.x * ppp) / 2.0) / ppp,
-            (y as f32 + (h as f32 - SETTINGS_SIZE.y * ppp) / 2.0) / ppp,
+            (x as f32 + (w as f32 - size.x * ppp) / 2.0) / ppp,
+            (y as f32 + (h as f32 - size.y * ppp) / 2.0) / ppp,
         ),
         None => pos2(200.0, 120.0),
     };
-    ctx.send_viewport_cmd(ViewportCommand::InnerSize(SETTINGS_SIZE));
+    ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
     ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
+}
+
+fn center_settings(ctx: &Context) {
+    center_window(ctx, SETTINGS_SIZE);
 }
 
 /// 画面の状態。値は mem::replace で受け渡すだけの短命な値なので、大きさの差は許容する。
@@ -116,6 +123,7 @@ enum Mode {
     Settings(SettingsDraft),
     Selecting(Selecting),
     Editing(Editor),
+    Album(Album),
 }
 
 pub struct App {
@@ -198,6 +206,43 @@ impl App {
         ctx.send_viewport_cmd(ViewportCommand::Title("設定".into()));
         center_settings(ctx);
         ctx.send_viewport_cmd(ViewportCommand::Focus);
+    }
+
+    fn open_album(&mut self, ctx: &Context) {
+        self.pending_capture = None;
+        let newest_first = match &self.mode {
+            Mode::Album(a) => a.newest_first(),
+            _ => true,
+        };
+        self.mode = Mode::Album(Album::open(ctx, &self.cfg.save_dir, newest_first));
+        ctx.send_viewport_cmd(ViewportCommand::WindowLevel(WindowLevel::Normal));
+        ctx.send_viewport_cmd(ViewportCommand::Decorations(true));
+        ctx.send_viewport_cmd(ViewportCommand::Title("SnapMark - アルバム".into()));
+        center_window(ctx, ALBUM_SIZE);
+        ctx.send_viewport_cmd(ViewportCommand::Focus);
+    }
+
+    fn album_ui(&mut self, root: &mut egui::Ui, mut a: Album) -> Mode {
+        let ctx = &root.ctx().clone();
+        let (outcome, reorder) = a.ui(root);
+        match outcome {
+            album::Outcome::Close => {
+                self.go_idle(ctx);
+                return Mode::Idle;
+            }
+            album::Outcome::Edit(path) => match image::open(&path) {
+                Ok(img) => {
+                    let monitor = capture::cursor_monitor_rect();
+                    return self.open_editor(ctx, img.to_rgba8(), monitor);
+                }
+                Err(e) => a.set_status(format!("画像を開けません: {e}")),
+            },
+            album::Outcome::None => {}
+        }
+        if let Some(newest_first) = reorder {
+            return Mode::Album(Album::open(ctx, &self.cfg.save_dir, newest_first));
+        }
+        Mode::Album(a)
     }
 
     fn settings_ui(&mut self, root: &mut egui::Ui, mut d: SettingsDraft) -> Mode {
@@ -861,13 +906,21 @@ impl App {
     fn crop_and_edit(&mut self, ctx: &Context, shot: &Shot, (x, y, w, h): (u32, u32, u32, u32)) -> Mode {
         let img = &shot.image;
         let base = image::imageops::crop_imm(img, x, y, w, h).to_image();
+        let monitor = Some((shot.origin.0, shot.origin.1, img.width(), img.height()));
+        self.open_editor(ctx, base, monitor)
+    }
+
+    /// `base` を編集画面で開く。`monitor`(物理座標の x, y, 幅, 高さ)の中央にウィンドウを置く。
+    fn open_editor(&mut self, ctx: &Context, base: image::RgbaImage, monitor: Option<(i32, i32, u32, u32)>) -> Mode {
+        let (w, h) = (base.width(), base.height());
+        let (mx, my, mw, mh) = monitor.unwrap_or((0, 0, 1920, 1080));
         let ppp = ctx.pixels_per_point();
         let zoom = 1.0 / ppp; // 等倍(1画像ピクセル = 1物理ピクセル)
-        let (mon_w, mon_h) = (img.width() as f32 / ppp, img.height() as f32 / ppp);
+        let (mon_w, mon_h) = (mw as f32 / ppp, mh as f32 / ppp);
         let win_w = (w as f32 * zoom + MARGIN * 2.0).max(980.0).min(mon_w - 80.0);
         // 左のツールパレット(縦一列)が収まる高さを下限にする
         let win_h = (h as f32 * zoom + MARGIN * 2.0 + TOOLBAR_H + STATUS_H).max(640.0).min(mon_h - 80.0);
-        let origin = vec2(shot.origin.0 as f32 / ppp, shot.origin.1 as f32 / ppp);
+        let origin = vec2(mx as f32 / ppp, my as f32 / ppp);
         // 確認ウィンドウは撮影したモニタの中央に出す
         let pos = pos2(origin.x + ((mon_w - win_w) / 2.0).max(0.0), origin.y + ((mon_h - win_h) / 2.0).max(0.0));
 
@@ -1058,6 +1111,7 @@ impl eframe::App for App {
             match cmd {
                 Cmd::Capture => self.request_capture(ctx),
                 Cmd::Settings => self.open_settings(ctx),
+                Cmd::Album => self.open_album(ctx),
                 Cmd::OpenFolder => {
                     let _ = std::fs::create_dir_all(&self.cfg.save_dir);
                     crate::winutil::open_in_explorer(&self.cfg.save_dir);
@@ -1119,10 +1173,11 @@ impl eframe::App for App {
             Mode::Selecting(s) => self.selecting_ui(ui, s),
             Mode::Editing(e) => self.editing_ui(ui, e),
             Mode::Settings(d) => self.settings_ui(ui, d),
+            Mode::Album(a) => self.album_ui(ui, a),
         };
 
         // 編集・設定ウィンドウは他のウィンドウに隠れても Alt+Tab で戻れるようにする
-        let listed = matches!(self.mode, Mode::Editing(_) | Mode::Settings(_));
+        let listed = matches!(self.mode, Mode::Editing(_) | Mode::Settings(_) | Mode::Album(_));
         crate::winutil::set_listed(frame, listed);
     }
 }
