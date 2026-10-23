@@ -160,7 +160,7 @@ impl App {
             update: None,
             checking: false,
             tx,
-            trim_at: None,
+            trim_at: Some(Instant::now() + Duration::from_secs(3)),
         };
         app.refresh_update_badge();
         app
@@ -1175,8 +1175,9 @@ impl eframe::App for App {
             && matches!(self.mode, Mode::Idle)
             && Instant::now() >= at
         {
-            self.trim_at = None;
             crate::winutil::trim_memory();
+            // 待機中にじわじわ増える分も、定期的に返す
+            self.trim_at = Some(Instant::now() + Duration::from_secs(300));
         }
 
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
