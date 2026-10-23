@@ -123,16 +123,16 @@ fn run() -> Result<()> {
 
             // タスクトレイ
             let menu = Menu::new();
-            let capture_item = MenuItem::new("撮影", true, None);
-            let album_item = MenuItem::new("アルバム...", true, None);
+            let capture_item = MenuItem::new(format!("スクショを撮る ({})", app_cfg.hotkey), true, None);
+            let album_item = MenuItem::new("アルバムを開く", true, None);
             let folder_item = MenuItem::new("保存フォルダを開く", true, None);
             let config_item = MenuItem::new("設定...", true, None);
             let update_item = MenuItem::new("", false, None);
             let quit_item = MenuItem::new("終了", true, None);
             menu.append_items(&[
                 &capture_item,
-                &PredefinedMenuItem::separator(),
                 &album_item,
+                &PredefinedMenuItem::separator(),
                 &folder_item,
                 &config_item,
                 &PredefinedMenuItem::separator(),
@@ -173,7 +173,7 @@ fn run() -> Result<()> {
                         button: MouseButton::Left, button_state: MouseButtonState::Up, ..
                     } = e
                     {
-                        let _ = tx.send(Cmd::Capture);
+                        let _ = tx.send(Cmd::Album);
                         ctx.request_repaint();
                     }
                 }));
@@ -190,9 +190,11 @@ fn run() -> Result<()> {
             // ホットキーはアプリが生きている間ずっと保持する
             std::mem::forget(manager);
 
-            // `--album` で起動すると、最初にアルバムを開く
+            // `--album` / `--settings` で起動すると、最初にアルバム / 設定を開く
             if std::env::args().skip(1).any(|a| a == "--album") {
                 let _ = tx.send(Cmd::Album);
+            } else if std::env::args().skip(1).any(|a| a == "--settings") {
+                let _ = tx.send(Cmd::Settings);
             }
 
             Ok(Box::new(App::new(app_cfg, rx, tx, tray)))

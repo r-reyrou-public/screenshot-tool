@@ -3,7 +3,9 @@
 use crate::output;
 use egui::{Color32, ColorImage, Context, Key, Modifiers, Rect, Sense, Stroke, TextureHandle, TextureOptions, pos2, vec2};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 const THUMB_PX: u32 = 240;
@@ -48,6 +50,14 @@ pub struct Album {
     viewer: Option<(usize, TextureHandle)>,
     confirm_delete: bool,
     status: String,
+    /// 閉じたときに、サムネイルの読み込みスレッドへ中止を知らせる
+    cancel: Arc<AtomicBool>,
+}
+
+impl Drop for Album {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
 }
 
 fn is_image(p: &Path) -> bool {
@@ -87,6 +97,7 @@ impl Album {
             viewer: None,
             confirm_delete: false,
             status: String::new(),
+            cancel: Arc::new(AtomicBool::new(false)),
         };
         album.show_more(ctx);
         album
@@ -105,9 +116,12 @@ impl Album {
         let from = self.shown;
         self.shown = (self.shown + BATCH).min(self.entries.len());
         let paths: Vec<PathBuf> = self.entries[from..self.shown].iter().map(|e| e.path.clone()).collect();
-        let (tx, ctx) = (self.tx.clone(), ctx.clone());
+        let (tx, ctx, cancel) = (self.tx.clone(), ctx.clone(), self.cancel.clone());
         std::thread::spawn(move || {
             for path in paths {
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
                 let image = image::open(&path).ok().map(|img| {
                     let dims = (img.width(), img.height());
                     let t = img.thumbnail(THUMB_PX, THUMB_PX).to_rgba8();

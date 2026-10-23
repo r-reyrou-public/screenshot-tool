@@ -56,6 +56,27 @@ pub fn open_release_page() {
     }
 }
 
+/// 既定のブラウザで、このツールのリポジトリ(GitHub)を開く。
+pub fn open_repo_page() {
+    let Some(exe) = windows_dir().map(|d| d.join("explorer.exe")) else { return };
+    let url = crate::update::repo_url();
+    if url.starts_with("https://github.com/") {
+        let _ = std::process::Command::new(exe).arg(url).spawn();
+    }
+}
+
+/// 使い終わったメモリを OS へ返す。アルバムや編集画面を閉じた後に呼んで、常駐中の使用量を元に戻す。
+pub fn trim_memory() {
+    use windows_sys::Win32::System::Memory::{GetProcessHeap, HeapCompact};
+    use windows_sys::Win32::System::ProcessStatus::K32EmptyWorkingSet;
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    // SAFETY: 自プロセスのヒープとプロセスハンドルに対する、失敗しても害のない呼び出し
+    unsafe {
+        HeapCompact(GetProcessHeap(), 0);
+        K32EmptyWorkingSet(GetCurrentProcess());
+    }
+}
+
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }

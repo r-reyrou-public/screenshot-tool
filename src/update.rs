@@ -14,6 +14,14 @@ const REPO: &str = "glasssoundforest-lab/screenshot-tool";
 pub const INTERVAL: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 const MAX_BODY: usize = 512 * 1024;
 
+/// 設定画面などに表示する署名(作者名)
+pub const AUTHOR: &str = "Reyrou";
+
+/// ソースコードのリポジトリ(画面に表示するURL)
+pub fn repo_url() -> String {
+    format!("https://github.com/{REPO}")
+}
+
 pub fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }

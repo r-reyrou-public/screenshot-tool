@@ -142,6 +142,8 @@ pub struct App {
     /// 更新確認の通信中
     checking: bool,
     tx: Sender<Cmd>,
+    /// 待機に戻った後、使い終わったメモリを OS へ返す時刻
+    trim_at: Option<Instant>,
 }
 
 impl App {
@@ -158,6 +160,7 @@ impl App {
             update: None,
             checking: false,
             tx,
+            trim_at: None,
         };
         app.refresh_update_badge();
         app
@@ -184,7 +187,9 @@ impl App {
 
     /// 常駐中のウィンドウは画面外の 1x1 に退避させる(非表示にすると再描画が止まるため)。
     fn go_idle(&mut self, ctx: &Context) {
+        // 撮影画像・編集内容・アルバムのサムネイルは、ここで手放す(次に使うときに作り直す)
         self.mode = Mode::Idle;
+        self.trim_at = Some(Instant::now() + Duration::from_millis(1500));
         let ppp = ctx.pixels_per_point();
         ctx.send_viewport_cmd(ViewportCommand::WindowLevel(WindowLevel::Normal));
         ctx.send_viewport_cmd(ViewportCommand::Decorations(false));
@@ -209,6 +214,11 @@ impl App {
     }
 
     fn open_album(&mut self, ctx: &Context) {
+        // 撮影中・編集中は、作業を壊さないよう、そのウィンドウを前面に出すだけにする
+        if matches!(self.mode, Mode::Selecting(_) | Mode::Editing(_)) {
+            ctx.send_viewport_cmd(ViewportCommand::Focus);
+            return;
+        }
         self.pending_capture = None;
         let newest_first = match &self.mode {
             Mode::Album(a) => a.newest_first(),
@@ -255,7 +265,39 @@ impl App {
         }
         let mut cancel = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
         let mut save = false;
-        egui::CentralPanel::default().show(root, |ui| {
+        egui::Panel::bottom("about").resizable(false).show(root, |ui| {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.strong("SnapMark");
+                ui.label(format!("Ver.{}", crate::update::current_version()));
+                ui.separator();
+                ui.label(format!("© {}", crate::update::AUTHOR));
+                ui.separator();
+                ui.label("Apache-2.0");
+            });
+            ui.horizontal(|ui| {
+                let url = crate::update::repo_url();
+                ui.label(&url);
+                if ui.small_button("開く").clicked() {
+                    crate::winutil::open_repo_page();
+                }
+            });
+            ui.add_space(6.0);
+        });
+        // 保存・キャンセルは、設定項目が長くても常に見えるよう、フッターの上に固定する
+        egui::Panel::bottom("buttons").resizable(false).show(root, |ui| {
+            ui.add_space(6.0);
+            if !d.msg.is_empty() {
+                ui.colored_label(Color32::RED, &d.msg);
+            }
+            ui.horizontal(|ui| {
+                save = ui.button("保存").clicked();
+                cancel |= ui.button("キャンセル").clicked();
+            });
+            ui.add_space(6.0);
+        });
+        egui::CentralPanel::default().show(root, |root_ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(root_ui, |ui| {
             egui::Grid::new("settings").num_columns(2).spacing([12.0, 10.0]).show(ui, |ui| {
                 ui.label("ホットキー");
                 ui.text_edit_singleline(&mut d.cfg.hotkey);
@@ -392,13 +434,6 @@ impl App {
             ui.add_space(10.0);
             ui.weak("ホットキーの変更は再起動後に反映されます。");
             ui.weak(format!("設定ファイル: {}", crate::config::ini_path().display()));
-            ui.add_space(8.0);
-            if !d.msg.is_empty() {
-                ui.colored_label(Color32::RED, &d.msg);
-            }
-            ui.horizontal(|ui| {
-                save = ui.button("保存").clicked();
-                cancel |= ui.button("キャンセル").clicked();
             });
         });
         if save {
@@ -1134,6 +1169,14 @@ impl eframe::App for App {
                     ctx.send_viewport_cmd(ViewportCommand::Close);
                 }
             }
+        }
+
+        if let Some(at) = self.trim_at
+            && matches!(self.mode, Mode::Idle)
+            && Instant::now() >= at
+        {
+            self.trim_at = None;
+            crate::winutil::trim_memory();
         }
 
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
