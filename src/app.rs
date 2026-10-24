@@ -131,6 +131,8 @@ struct SettingsDraft {
     frames: u32,
     /// ホットキーを、実際にキーを押して入力している最中
     capturing_key: bool,
+    /// 操作キーの欄のうち、いま実際にキーを押して入力している最中のもの
+    capture_op: Option<u8>,
 }
 
 /// エクスプローラーの「パスのコピー」が付ける引用符や前後の空白を除く。
@@ -255,6 +257,7 @@ impl App {
             msg: std::mem::take(&mut self.startup_msg),
             frames: 0,
             capturing_key: false,
+            capture_op: None,
         });
         ctx.send_viewport_cmd(ViewportCommand::WindowLevel(WindowLevel::Normal));
         ctx.send_viewport_cmd(ViewportCommand::Decorations(true));
@@ -313,7 +316,7 @@ impl App {
             d.frames += 1;
             ctx.request_repaint();
         }
-        let mut cancel = !d.capturing_key && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+        let mut cancel = !d.capturing_key && d.capture_op.is_none() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
         let mut save = false;
         let was_capturing = d.capturing_key;
         egui::Panel::bottom("about").resizable(false).show(root, |ui| {
@@ -454,22 +457,34 @@ impl App {
                 ui.label("ウィンドウ自動検出");
                 ui.vertical(|ui| {
                     ui.checkbox(&mut d.cfg.window_snap, "ON(範囲選択中、クリックでウィンドウを撮影)");
-                    ui.horizontal(|ui| {
-                        ui.label("押している間 ON/OFF を反転するキー");
-                        ui.add(egui::TextEdit::singleline(&mut d.cfg.window_snap_key).desired_width(70.0));
-                    });
-                    ui.weak("例: W / Tab / Space / Ctrl / Alt(空欄か off で無効)");
                     ui.checkbox(&mut d.cfg.element_snap, "UI要素(ボタン・パネルなど)単位まで細かく検出");
-                    ui.horizontal(|ui| {
-                        ui.label("押している間 要素検出を反転するキー");
-                        ui.add(egui::TextEdit::singleline(&mut d.cfg.element_snap_key).desired_width(70.0));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("押している間 最も細かい要素を選ぶキー");
-                        ui.add(egui::TextEdit::singleline(&mut d.cfg.element_detail_key).desired_width(70.0));
-                    });
                     ui.add(egui::Slider::new(&mut d.cfg.visual_gap, 4..=60).text("かたまりの大きさ(隙間 px)"));
                     ui.weak("詳細キー中、Webページなど要素が公開されない画面では、見た目から文字・画像のかたまりを切り出します");
+                });
+                ui.end_row();
+                ui.label("範囲選択中の操作キー");
+                ui.vertical(|ui| {
+                    egui::Grid::new("op_keys").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                        let cap = &mut d.capture_op;
+                        ui.label("ウィンドウ検出 ON/OFF");
+                        key_field(ui, &mut d.cfg.window_snap_key, 1, cap);
+                        ui.end_row();
+                        ui.label("UI要素検出 ON/OFF");
+                        key_field(ui, &mut d.cfg.element_snap_key, 2, cap);
+                        ui.end_row();
+                        ui.label("最も細かい要素を選ぶ");
+                        key_field(ui, &mut d.cfg.element_detail_key, 3, cap);
+                        ui.end_row();
+                        ui.label("ルーペを動かす");
+                        key_field(ui, &mut d.cfg.loupe_move_key, 4, cap);
+                        ui.end_row();
+                        ui.label("画面全体を撮る");
+                        key_field(ui, &mut d.cfg.fullscreen_key, 5, cap);
+                        ui.end_row();
+                    });
+                    ui.weak("上の4つは、押している間だけ働きます(ON/OFFは設定と反転)");
+                    ui.weak("「押して設定」の後に使いたいキーを押します(Shift / Ctrl / Alt も可)");
+                    ui.weak("手入力もできます(例: W, Tab, Space, Shift。空欄か off で無効)");
                 });
                 ui.end_row();
                 ui.label("ルーペの位置");
@@ -500,7 +515,7 @@ impl App {
                 ui.vertical(|ui| {
                     ui.add(egui::Slider::new(&mut d.cfg.loupe_offset_x, 0..=1200).text("横"));
                     ui.add(egui::Slider::new(&mut d.cfg.loupe_offset_y, 0..=800).text("縦"));
-                    ui.weak("隅から内側へのずらし量。範囲選択中に Shift+ドラッグでも動かせます");
+                    ui.weak("隅から内側へのずらし量。範囲選択中に「ルーペを動かすキー」+ドラッグでも動かせます");
                     if ui.button("位置をリセット").clicked() {
                         let def = Config::default();
                         d.cfg.loupe_offset_x = def.loupe_offset_x;
@@ -544,8 +559,11 @@ impl App {
             } else if !valid_key_name(&d.cfg.window_snap_key)
                 || !valid_key_name(&d.cfg.element_snap_key)
                 || !valid_key_name(&d.cfg.element_detail_key)
+                || !valid_key_name(&d.cfg.loupe_move_key)
             {
                 d.msg = "キー名が不正です (例: W, Tab, Space, Ctrl)".into();
+            } else if Key::from_name(d.cfg.fullscreen_key.trim()).is_none() && !d.cfg.fullscreen_key.trim().is_empty() {
+                d.msg = "「画面全体を撮る」には、Enter や F などの通常のキーを指定してください(空欄で無効)".into();
             } else if clean_path(&d.dir).is_empty() {
                 d.msg = "保存先を指定してください".into();
             } else {
@@ -680,7 +698,9 @@ impl App {
         let detail = snap_on && key_held(ctx, &self.cfg.element_detail_key);
         let elem_mode = snap_on && (detail || self.cfg.element_snap != key_held(ctx, &self.cfg.element_snap_key));
         let mut chosen_elem: Option<(isize, (i32, i32, i32, i32))> = None;
-        if elem_mode && s.drag_start.is_none() && s.loupe_grab.is_none() && !ctx.input(|i| i.modifiers.shift) {
+        // ルーペを動かすキー(既定は Shift)を押している間
+        let loupe_held = key_held(ctx, &self.cfg.loupe_move_key);
+        if elem_mode && s.drag_start.is_none() && s.loupe_grab.is_none() && !loupe_held {
             self.probe_elements(&mut s);
             if detail {
                 self.probe_visual(&mut s);
@@ -713,7 +733,7 @@ impl App {
 
             // ルーペの位置。Shift を押している間は逃げず、ドラッグで動かせる。
             let cur = ui.input(|i| i.pointer.latest_pos());
-            let shift = ui.input(|i| i.modifiers.shift);
+            let shift = loupe_held;
             let geo = loupe.map(|(right, bottom)| {
                 let avoid = if shift || s.loupe_grab.is_some() { None } else { cur };
                 loupe_geometry(rect, right, bottom, loupe_zoom, loupe_size, s.loupe_off, avoid)
@@ -877,20 +897,29 @@ impl App {
                     );
                 }
                 None => {
+                    let fs = self.cfg.fullscreen_key.trim();
+                    let full = if fs.is_empty() { String::new() } else { format!("  /  {fs}: 全画面") };
+                    let lk = self.cfg.loupe_move_key.trim();
                     let hint = if detail {
-                        "クリック: 最も細かい要素を撮影  /  ドラッグ: 範囲選択  /  Enter: 全画面  /  右クリック・Esc: キャンセル"
+                        format!("クリック: 最も細かい要素を撮影  /  ドラッグ: 範囲選択{full}  /  右クリック・Esc: キャンセル")
                     } else if elem_mode {
-                        "クリック: ペインを撮影(Eを押している間はウィンドウ全体 / Dを押している間は最も細かい要素)  /  ドラッグ: 範囲選択  /  Enter: 全画面  /  右クリック・Esc: キャンセル"
+                        format!(
+                            "クリック: ペインを撮影({}を押している間はウィンドウ全体 / {}を押している間は最も細かい要素)  /  ドラッグ: 範囲選択{full}  /  右クリック・Esc: キャンセル",
+                            self.cfg.element_snap_key.trim(),
+                            self.cfg.element_detail_key.trim()
+                        )
                     } else if snap_on {
-                        "クリック: ウィンドウを撮影  /  ドラッグ: 範囲選択  /  Enter: 全画面  /  右クリック・Esc: キャンセル"
+                        format!("クリック: ウィンドウを撮影  /  ドラッグ: 範囲選択{full}  /  右クリック・Esc: キャンセル")
+                    } else if lk.is_empty() || lk.eq_ignore_ascii_case("off") {
+                        format!("ドラッグ: 範囲選択{full}  /  右クリック・Esc: キャンセル")
                     } else {
-                        "ドラッグ: 範囲選択  /  Enter: 全画面  /  Shift+ドラッグ: ルーペ移動  /  右クリック・Esc: キャンセル"
+                        format!("ドラッグ: 範囲選択{full}  /  {lk}+ドラッグ: ルーペ移動  /  右クリック・Esc: キャンセル")
                     };
                     label(
                         painter,
                         pos2(rect.center().x, rect.min.y + 40.0),
                         egui::Align2::CENTER_CENTER,
-                        hint.into(),
+                        hint,
                     );
                 }
             }
@@ -918,7 +947,7 @@ impl App {
                 eprintln!("ini write failed: {e}");
             }
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+        if Key::from_name(self.cfg.fullscreen_key.trim()).is_some_and(|k| ctx.input_mut(|i| i.consume_key(Modifiers::NONE, k))) {
             chosen = Some(screen);
         }
         if cancel {
@@ -1202,6 +1231,44 @@ fn is_modifier_key(key: Key) -> bool {
             | Key::SuperLeft
             | Key::SuperRight
     )
+}
+
+/// 「押して設定」で押されたキーを、設定に書く名前にする(修飾キーは Shift / Ctrl / Alt)。
+fn key_label(key: Key) -> Option<String> {
+    Some(match key {
+        Key::ShiftLeft | Key::ShiftRight => "Shift".into(),
+        Key::ControlLeft | Key::ControlRight => "Ctrl".into(),
+        Key::AltLeft | Key::AltRight => "Alt".into(),
+        Key::SuperLeft | Key::SuperRight => return None,
+        k => k.name().to_string(),
+    })
+}
+
+/// 操作キーの入力欄。手入力と、「押して設定」でのキー入力の両方ができる。
+fn key_field(ui: &mut egui::Ui, text: &mut String, id: u8, capture: &mut Option<u8>) {
+    ui.horizontal(|ui| {
+        if *capture == Some(id) {
+            let pressed = ui.input(|i| {
+                i.events.iter().find_map(|e| match e {
+                    egui::Event::Key { key, pressed: true, repeat: false, .. } => Some(*key),
+                    _ => None,
+                })
+            });
+            ui.add_enabled(false, egui::TextEdit::singleline(&mut text.clone()).desired_width(70.0));
+            ui.weak("キーを押してください(Esc で中止)");
+            if let Some(k) = pressed {
+                if k != Key::Escape && let Some(name) = key_label(k) {
+                    *text = name;
+                }
+                *capture = None;
+            }
+        } else {
+            ui.add(egui::TextEdit::singleline(text).desired_width(70.0));
+            if ui.button("押して設定").clicked() {
+                *capture = Some(id);
+            }
+        }
+    });
 }
 
 fn valid_key_name(name: &str) -> bool {

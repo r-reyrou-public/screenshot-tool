@@ -35,6 +35,10 @@ pub struct Config {
     pub element_snap_key: String,
     /// 押している間だけ、ペインではなく最も細かい要素(ボタンやタブ1つなど)を選ぶキー
     pub element_detail_key: String,
+    /// 範囲選択中、押している間だけルーペをドラッグで動かせるキー
+    pub loupe_move_key: String,
+    /// 範囲選択中、押すと画面全体を撮るキー
+    pub fullscreen_key: String,
     /// Windows の起動時に、このツールも自動で起動する
     pub autostart: bool,
     /// 見た目のかたまり検出で、同じかたまりとみなす隙間の大きさ(px)。大きいほど大きなかたまりになる
@@ -67,6 +71,8 @@ impl Default for Config {
             element_snap: false,
             element_snap_key: "E".into(),
             element_detail_key: "D".into(),
+            loupe_move_key: "Shift".into(),
+            fullscreen_key: "Enter".into(),
             visual_gap: 14,
             autostart: false,
             update_check: true,
@@ -115,6 +121,8 @@ fn parse(text: &str) -> Config {
             "element_snap" => cfg.element_snap = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"),
             "element_snap_key" => cfg.element_snap_key = v.into(),
             "element_detail_key" => cfg.element_detail_key = v.into(),
+            "loupe_move_key" => cfg.loupe_move_key = v.into(),
+            "fullscreen_key" => cfg.fullscreen_key = v.into(),
             "autostart" => cfg.autostart = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"),
             "update_check" => cfg.update_check = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"),
             "last_update_check" => cfg.last_update_check = v.parse().unwrap_or(0),
@@ -203,6 +211,10 @@ pub fn save(cfg: &Config) -> std::io::Result<()> {
          element_snap_key={}\r\n\
          ; 押している間だけ最も細かい要素(ボタンやタブ1つなど)を選ぶキー。要素検出がOFFでも使える\r\n\
          element_detail_key={}\r\n\
+         ; 範囲選択中、押している間だけルーペをドラッグで動かせるキー\r\n\
+         loupe_move_key={}\r\n\
+         ; 範囲選択中、押すと画面全体を撮るキー\r\n\
+         fullscreen_key={}\r\n\
          ; Webページなど要素を公開しない画面で、詳細キーを押したときに見た目から切り出すかたまりの大きさ\r\n\
          ; (隙間がこのpx以下なら同じかたまり) 4-60。大きいほど大きなかたまりになる\r\n\
          visual_gap={}\r\n",
@@ -227,6 +239,8 @@ pub fn save(cfg: &Config) -> std::io::Result<()> {
         if cfg.element_snap { 1 } else { 0 },
         cfg.element_snap_key,
         cfg.element_detail_key,
+        cfg.loupe_move_key,
+        cfg.fullscreen_key,
         cfg.visual_gap,
     );
     std::fs::write(ini_path(), text)

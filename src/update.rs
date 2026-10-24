@@ -50,7 +50,9 @@ fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
 /// `latest` が、いま動いている版より新しければ、表示用の版番号(先頭の v 抜き)を返す。
 pub fn newer_than_current(latest: &str) -> Option<String> {
     let l = parse_version(latest)?;
-    (l > parse_version(current_version())?).then(|| latest.trim().trim_start_matches('v').to_string())
+    // 自分の版が "0.7.9-beta" のようなベータ版でも、数字の3つ組で比べる
+    let current = current_version().split('-').next()?;
+    (l > parse_version(current)?).then(|| latest.trim().trim_start_matches('v').to_string())
 }
 
 /// 最新リリースのタグ名(例 "v0.7.0")。
