@@ -21,6 +21,8 @@ pub enum Cmd {
     UpdateChecked(Option<String>),
     /// 新しい版のリリースページを開く
     OpenUpdatePage,
+    /// スクロール撮影の結果(つないだ画像と、撮ったモニタの矩形)。中止や失敗は `None`
+    ScrollDone(Option<(image::RgbaImage, (i32, i32, u32, u32))>),
     Quit,
 }
 
@@ -122,6 +124,8 @@ struct Selecting {
     vprobe: (i32, i32, Instant),
     /// 要素を調べたときの (物理x, 物理y, 時刻, 対象ウィンドウ)。調べ過ぎないための間引きに使う
     probe: (i32, i32, Instant, isize),
+    /// スクロール撮影が ON(選んだ範囲・ウィンドウを、自動でスクロールしながら撮る)
+    scroll: bool,
 }
 
 struct SettingsDraft {
@@ -181,6 +185,8 @@ pub struct App {
     pending_capture: Option<Instant>,
     /// ウィンドウ撮影の待機中: (撮る時刻, 対象ウィンドウの物理座標の枠)
     pending_window: Option<PendingWindow>,
+    /// スクロール撮影の待機中: (始める時刻, 範囲(物理座標の left, top, right, bottom))
+    pending_scroll: Option<(Instant, (i32, i32, i32, i32))>,
     /// UI Automation(要素検出)。最初に必要になったときに作る
     uia: Option<Uia>,
     quitting: bool,
@@ -211,6 +217,7 @@ impl App {
             checking: false,
             tx,
             trim_at: Some(Instant::now() + Duration::from_secs(3)),
+            pending_scroll: None,
             startup_msg,
         };
         app.refresh_update_badge();
@@ -481,6 +488,9 @@ impl App {
                         ui.label("画面全体を撮る");
                         key_field(ui, &mut d.cfg.fullscreen_key, 5, cap);
                         ui.end_row();
+                        ui.label("スクロール撮影のON/OFF(押すたびに切り替え)");
+                        key_field(ui, &mut d.cfg.scroll_key, 6, cap);
+                        ui.end_row();
                     });
                     ui.weak("上の4つは、押している間だけ働きます(ON/OFFは設定と反転)");
                     ui.weak("「押して設定」の後に使いたいキーを押します(Shift / Ctrl / Alt も可)");
@@ -560,6 +570,7 @@ impl App {
                 || !valid_key_name(&d.cfg.element_snap_key)
                 || !valid_key_name(&d.cfg.element_detail_key)
                 || !valid_key_name(&d.cfg.loupe_move_key)
+                || !valid_key_name(&d.cfg.scroll_key)
             {
                 d.msg = "キー名が不正です (例: W, Tab, Space, Ctrl)".into();
             } else if Key::from_name(d.cfg.fullscreen_key.trim()).is_none() && !d.cfg.fullscreen_key.trim().is_empty() {
@@ -638,6 +649,7 @@ impl App {
                     cand_offset: 0,
                     vprobe: (-100_000, -100_000, Instant::now()),
                     probe: (i32::MIN, i32::MIN, Instant::now(), 0),
+                    scroll: false,
                 });
                 if self.uia.is_none() {
                     self.uia = Uia::new();
@@ -678,6 +690,9 @@ impl App {
 
         let cancel = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
             || ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Secondary));
+        if Key::from_name(self.cfg.scroll_key.trim()).is_some_and(|k| ctx.input_mut(|i| i.consume_key(Modifiers::NONE, k))) {
+            s.scroll = !s.scroll;
+        }
         // ルーペの配置 (右か, 下か)。"off" や不明な値なら表示しない
         let loupe = match self.cfg.loupe_corner.as_str() {
             "top_left" => Some((false, false)),
@@ -898,7 +913,11 @@ impl App {
                 }
                 None => {
                     let fs = self.cfg.fullscreen_key.trim();
-                    let full = if fs.is_empty() { String::new() } else { format!("  /  {fs}: 全画面") };
+                    let sc = self.cfg.scroll_key.trim();
+                    let mut full = if fs.is_empty() { String::new() } else { format!("  /  {fs}: 全画面") };
+                    if !sc.is_empty() {
+                        full += &format!("  /  {sc}: スクロール撮影");
+                    }
                     let lk = self.cfg.loupe_move_key.trim();
                     let hint = if detail {
                         format!("クリック: 最も細かい要素を撮影  /  ドラッグ: 範囲選択{full}  /  右クリック・Esc: キャンセル")
@@ -924,6 +943,14 @@ impl App {
                 }
             }
 
+            if s.scroll {
+                label(
+                    painter,
+                    pos2(rect.center().x, rect.min.y + 80.0),
+                    egui::Align2::CENTER_CENTER,
+                    "スクロール撮影 ON: 範囲かウィンドウを選ぶと、自動でスクロールしながら縦に長く撮ります(撮影中の中止: Esc)".into(),
+                );
+            }
             if let (Some((outer, n)), Some(cur)) = (geo, cur)
                 && rect.contains(cur) {
                     draw_loupe(painter, &s, rect, cur, outer, n, loupe_zoom);
@@ -956,15 +983,32 @@ impl App {
         }
         if let Some(i) = chosen_window {
             let win = s.windows[i].clone();
+            if s.scroll {
+                self.begin_scroll_capture(ctx, win.hwnd, win.rect);
+                return Mode::Idle;
+            }
             let radius = crate::winlist::corner_radius(win.hwnd);
             self.begin_window_capture(ctx, win.hwnd, win.rect, radius);
             return Mode::Idle;
         }
         if let Some((hwnd, rect)) = chosen_elem {
+            if s.scroll {
+                self.begin_scroll_capture(ctx, hwnd, rect);
+                return Mode::Idle;
+            }
             self.begin_window_capture(ctx, hwnd, rect, 0);
             return Mode::Idle;
         }
         match chosen {
+            Some(sel) if s.scroll => {
+                let img = &s.shot.image;
+                let (kx, ky) = (img.width() as f32 / screen.width(), img.height() as f32 / screen.height());
+                let x = s.shot.origin.0 + ((sel.min.x - screen.min.x) * kx).round() as i32;
+                let y = s.shot.origin.1 + ((sel.min.y - screen.min.y) * ky).round() as i32;
+                let (w, h) = ((sel.width() * kx).round() as i32, (sel.height() * ky).round() as i32);
+                self.begin_scroll_capture(ctx, 0, (x, y, x + w.max(1), y + h.max(1)));
+                Mode::Idle
+            }
             Some(sel) => self.start_editing(ctx, &s, sel, screen),
             None => Mode::Selecting(s),
         }
@@ -978,6 +1022,15 @@ impl App {
         }
         self.go_idle(ctx);
         self.pending_window = Some((Instant::now() + Duration::from_millis(350), rect, radius));
+    }
+
+    /// オーバーレイを消し、少し待ってから `rect`(物理座標)のスクロール撮影を始める。
+    fn begin_scroll_capture(&mut self, ctx: &Context, hwnd: isize, rect: (i32, i32, i32, i32)) {
+        if hwnd != 0 {
+            crate::winlist::focus_window(hwnd);
+        }
+        self.go_idle(ctx);
+        self.pending_scroll = Some((Instant::now() + Duration::from_millis(350), rect));
     }
 
     /// 詳細キー押下中の候補を作る。UI Automation の要素(ウィンドウ自身まで)と、撮影済みの画像から
@@ -1400,6 +1453,11 @@ impl eframe::App for App {
                     }
                 }
                 Cmd::OpenUpdatePage => crate::winutil::open_release_page(),
+                Cmd::ScrollDone(done) => {
+                    if let Some((img, monitor)) = done {
+                        self.mode = self.open_editor(ctx, img, Some(monitor));
+                    }
+                }
                 Cmd::Quit => {
                     self.quitting = true;
                     ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -1425,6 +1483,28 @@ impl eframe::App for App {
             if Instant::now() >= at {
                 self.pending_window = None;
                 self.finish_window_capture(ctx, rect, radius);
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(20));
+            }
+        }
+
+        if let Some((at, rect)) = self.pending_scroll {
+            if Instant::now() >= at {
+                self.pending_scroll = None;
+                let tx = self.tx.clone();
+                let ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    let done = crate::scroll::capture_scrolling(rect).map(|img| {
+                        let (cx, cy) = ((rect.0 + rect.2) / 2, (rect.1 + rect.3) / 2);
+                        let monitor = xcap::Monitor::from_point(cx, cy)
+                            .ok()
+                            .and_then(|m| Some((m.x().ok()?, m.y().ok()?, m.width().ok()?, m.height().ok()?)))
+                            .unwrap_or((0, 0, 1920, 1080));
+                        (img, monitor)
+                    });
+                    let _ = tx.send(Cmd::ScrollDone(done));
+                    ctx.request_repaint();
+                });
             } else {
                 ctx.request_repaint_after(Duration::from_millis(20));
             }

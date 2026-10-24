@@ -9,6 +9,7 @@ mod editor;
 mod icons;
 mod output;
 mod raster;
+mod scroll;
 mod shapes;
 mod text;
 mod update;

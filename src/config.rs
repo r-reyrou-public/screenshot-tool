@@ -39,6 +39,8 @@ pub struct Config {
     pub loupe_move_key: String,
     /// 範囲選択中、押すと画面全体を撮るキー
     pub fullscreen_key: String,
+    /// 範囲選択中、押すたびにスクロール撮影の ON/OFF を切り替えるキー
+    pub scroll_key: String,
     /// Windows の起動時に、このツールも自動で起動する
     pub autostart: bool,
     /// 見た目のかたまり検出で、同じかたまりとみなす隙間の大きさ(px)。大きいほど大きなかたまりになる
@@ -73,6 +75,7 @@ impl Default for Config {
             element_detail_key: "D".into(),
             loupe_move_key: "Shift".into(),
             fullscreen_key: "Enter".into(),
+            scroll_key: "S".into(),
             visual_gap: 14,
             autostart: false,
             update_check: true,
@@ -123,6 +126,7 @@ fn parse(text: &str) -> Config {
             "element_detail_key" => cfg.element_detail_key = v.into(),
             "loupe_move_key" => cfg.loupe_move_key = v.into(),
             "fullscreen_key" => cfg.fullscreen_key = v.into(),
+            "scroll_key" => cfg.scroll_key = v.into(),
             "autostart" => cfg.autostart = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"),
             "update_check" => cfg.update_check = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"),
             "last_update_check" => cfg.last_update_check = v.parse().unwrap_or(0),
@@ -215,6 +219,8 @@ pub fn save(cfg: &Config) -> std::io::Result<()> {
          loupe_move_key={}\r\n\
          ; 範囲選択中、押すと画面全体を撮るキー\r\n\
          fullscreen_key={}\r\n\
+         ; 範囲選択中、押すたびにスクロール撮影の ON/OFF を切り替えるキー\r\n\
+         scroll_key={}\r\n\
          ; Webページなど要素を公開しない画面で、詳細キーを押したときに見た目から切り出すかたまりの大きさ\r\n\
          ; (隙間がこのpx以下なら同じかたまり) 4-60。大きいほど大きなかたまりになる\r\n\
          visual_gap={}\r\n",
@@ -241,6 +247,7 @@ pub fn save(cfg: &Config) -> std::io::Result<()> {
         cfg.element_detail_key,
         cfg.loupe_move_key,
         cfg.fullscreen_key,
+        cfg.scroll_key,
         cfg.visual_gap,
     );
     std::fs::write(ini_path(), text)
