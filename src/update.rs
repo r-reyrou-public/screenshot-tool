@@ -9,7 +9,7 @@ use windows_sys::Win32::Networking::WinHttp::{
     WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetTimeouts,
 };
 
-const REPO: &str = "glasssoundforest-lab/screenshot-tool";
+const REPO: &str = "r-reyrou-public/screenshot-tool";
 /// 確認の間隔
 pub const INTERVAL: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 const MAX_BODY: usize = 512 * 1024;

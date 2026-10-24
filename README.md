@@ -56,7 +56,7 @@ Windows 向けの、常駐型スクリーンショット&注釈ツールです�
 
 ## ダウンロード
 
-[Releases](https://github.com/glasssoundforest-lab/screenshot-tool/releases) から `snapmark.exe` を入手できます。
+[Releases](https://github.com/r-reyrou-public/screenshot-tool/releases) から `snapmark.exe` を入手できます。
 インストール不要で、好きなフォルダに置いて実行します(設定の INI は exe と同じフォルダに作られます)。
 
 ## ビルド方法
@@ -72,7 +72,7 @@ Windows 向けの、常駐型スクリーンショット&注釈ツールです�
 ### 手順
 
 ```
-git clone https://github.com/glasssoundforest-lab/screenshot-tool.git
+git clone https://github.com/r-reyrou-public/screenshot-tool.git
 cd screenshot-tool
 cargo build --release
 ```
