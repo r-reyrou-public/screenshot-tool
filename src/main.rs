@@ -183,7 +183,7 @@ fn run() -> Result<()> {
             if let Some(icon) = tray_icon_image(false) {
                 tray = tray.with_icon(icon);
             }
-            let mut tray = Tray { icon: tray.build()?, update_item, capture_item, hotkeys: manager, hotkey: None };
+            let mut tray = Tray { icon: tray.build()?, update_item, capture_item, hotkeys: manager, hotkey: None, suspended: false };
             // ホットキーを登録できなくても終了はしない。トレイは使えるようにして、設定画面で直してもらう
             let startup_msg = match tray.set_hotkey(&app_cfg.hotkey) {
                 Ok(()) => String::new(),

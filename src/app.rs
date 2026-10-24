@@ -32,14 +32,33 @@ pub struct Tray {
     pub hotkeys: global_hotkey::GlobalHotKeyManager,
     /// いま登録されているホットキー
     pub hotkey: Option<global_hotkey::hotkey::HotKey>,
+    /// キー入力の受付中は、登録中のホットキーを一時的に外している(押したキーで撮影が始まらないように)
+    pub suspended: bool,
 }
 
 impl Tray {
     /// ホットキーを `text` に切り替える。新しいものを先に登録し、成功してから古いものを外すので、
     /// 失敗しても元のホットキーはそのまま使える。
+    /// 登録中のホットキーを一時的に外す。
+    pub fn suspend_hotkey(&mut self) {
+        if let (false, Some(hk)) = (self.suspended, self.hotkey) {
+            let _ = self.hotkeys.unregister(hk);
+            self.suspended = true;
+        }
+    }
+
+    /// `suspend_hotkey` で外したホットキーを登録し直す。
+    pub fn resume_hotkey(&mut self) {
+        if let (true, Some(hk)) = (self.suspended, self.hotkey) {
+            let _ = self.hotkeys.register(hk);
+        }
+        self.suspended = false;
+    }
+
     pub fn set_hotkey(&mut self, text: &str) -> Result<(), String> {
         use global_hotkey::hotkey::HotKey;
         let new: HotKey = text.parse().map_err(|e| format!("ホットキーの書式が不正です ({text}): {e}"))?;
+        self.resume_hotkey();
         if self.hotkey == Some(new) {
             return Ok(());
         }
@@ -294,8 +313,9 @@ impl App {
             d.frames += 1;
             ctx.request_repaint();
         }
-        let mut cancel = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+        let mut cancel = !d.capturing_key && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
         let mut save = false;
+        let was_capturing = d.capturing_key;
         egui::Panel::bottom("about").resizable(false).show(root, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -500,6 +520,18 @@ impl App {
             ui.weak(format!("設定ファイル: {}", crate::config::ini_path().display()));
             });
         });
+        // キー入力の受付が始まったら登録中のホットキーを外し、終わったら戻す
+        if d.capturing_key != was_capturing {
+            if d.capturing_key {
+                self.tray.suspend_hotkey();
+            } else {
+                self.tray.resume_hotkey();
+            }
+        }
+        if save || cancel {
+            d.capturing_key = false;
+            self.tray.resume_hotkey();
+        }
         if save {
             d.cfg.hotkey = d.cfg.hotkey.trim().to_string();
             if d.cfg.hotkey.parse::<global_hotkey::hotkey::HotKey>().is_err() {
