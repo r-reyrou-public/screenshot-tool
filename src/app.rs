@@ -356,7 +356,10 @@ impl App {
                         // 押されたキーの組み合わせをそのまま読み取る(Esc で中止)
                         let pressed = ui.input(|i| {
                             i.events.iter().find_map(|e| match e {
-                                egui::Event::Key { key, pressed: true, modifiers, repeat: false, .. } => {
+                                // Ctrl や Shift などの修飾キー自身の押下は、組み合わせの途中なので読み飛ばす
+                                egui::Event::Key { key, pressed: true, modifiers, repeat: false, .. }
+                                    if !is_modifier_key(*key) =>
+                                {
                                     Some((*key, *modifiers))
                                 }
                                 _ => None,
@@ -1185,6 +1188,20 @@ fn hotkey_text(key: Key, m: Modifiers) -> Option<String> {
     parts.push(&name);
     let text = parts.join("+");
     text.parse::<global_hotkey::hotkey::HotKey>().is_ok().then_some(text)
+}
+
+fn is_modifier_key(key: Key) -> bool {
+    matches!(
+        key,
+        Key::ShiftLeft
+            | Key::ShiftRight
+            | Key::ControlLeft
+            | Key::ControlRight
+            | Key::AltLeft
+            | Key::AltRight
+            | Key::SuperLeft
+            | Key::SuperRight
+    )
 }
 
 fn valid_key_name(name: &str) -> bool {
