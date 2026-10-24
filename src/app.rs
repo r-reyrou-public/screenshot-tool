@@ -28,9 +28,31 @@ pub enum Cmd {
 pub struct Tray {
     pub icon: tray_icon::TrayIcon,
     pub update_item: tray_icon::menu::MenuItem,
+    pub capture_item: tray_icon::menu::MenuItem,
+    pub hotkeys: global_hotkey::GlobalHotKeyManager,
+    /// いま登録されているホットキー
+    pub hotkey: Option<global_hotkey::hotkey::HotKey>,
 }
 
 impl Tray {
+    /// ホットキーを `text` に切り替える。新しいものを先に登録し、成功してから古いものを外すので、
+    /// 失敗しても元のホットキーはそのまま使える。
+    pub fn set_hotkey(&mut self, text: &str) -> Result<(), String> {
+        use global_hotkey::hotkey::HotKey;
+        let new: HotKey = text.parse().map_err(|e| format!("ホットキーの書式が不正です ({text}): {e}"))?;
+        if self.hotkey == Some(new) {
+            return Ok(());
+        }
+        self.hotkeys
+            .register(new)
+            .map_err(|e| format!("ホットキー {text} を登録できません。他のアプリが使っている可能性があります ({e})"))?;
+        if let Some(old) = self.hotkey.replace(new) {
+            let _ = self.hotkeys.unregister(old);
+        }
+        self.capture_item.set_text(format!("スクショを撮る ({text})"));
+        Ok(())
+    }
+
     fn show_update(&self, version: Option<&str>) {
         let tip = match version {
             Some(v) => format!("SnapMark - 新しい版 v{v} があります"),
@@ -88,6 +110,8 @@ struct SettingsDraft {
     dir: String,
     msg: String,
     frames: u32,
+    /// ホットキーを、実際にキーを押して入力している最中
+    capturing_key: bool,
 }
 
 /// エクスプローラーの「パスのコピー」が付ける引用符や前後の空白を除く。
@@ -147,10 +171,12 @@ pub struct App {
     tx: Sender<Cmd>,
     /// 待機に戻った後、使い終わったメモリを OS へ返す時刻
     trim_at: Option<Instant>,
+    /// 起動時にホットキーを登録できなかったときの案内。最初に開く設定画面に出す
+    startup_msg: String,
 }
 
 impl App {
-    pub fn new(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, tray: Tray) -> Self {
+    pub fn new(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, tray: Tray, startup_msg: String) -> Self {
         let mut app = Self {
             cfg,
             rx,
@@ -164,6 +190,7 @@ impl App {
             checking: false,
             tx,
             trim_at: Some(Instant::now() + Duration::from_secs(3)),
+            startup_msg,
         };
         app.refresh_update_badge();
         app
@@ -206,8 +233,9 @@ impl App {
         self.mode = Mode::Settings(SettingsDraft {
             dir: self.cfg.save_dir.display().to_string(),
             cfg: self.cfg.clone(),
-            msg: String::new(),
+            msg: std::mem::take(&mut self.startup_msg),
             frames: 0,
+            capturing_key: false,
         });
         ctx.send_viewport_cmd(ViewportCommand::WindowLevel(WindowLevel::Normal));
         ctx.send_viewport_cmd(ViewportCommand::Decorations(true));
@@ -303,7 +331,41 @@ impl App {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(root_ui, |ui| {
             egui::Grid::new("settings").num_columns(2).spacing([12.0, 10.0]).show(ui, |ui| {
                 ui.label("ホットキー");
-                ui.text_edit_singleline(&mut d.cfg.hotkey);
+                ui.horizontal(|ui| {
+                    if d.capturing_key {
+                        // 押されたキーの組み合わせをそのまま読み取る(Esc で中止)
+                        let pressed = ui.input(|i| {
+                            i.events.iter().find_map(|e| match e {
+                                egui::Event::Key { key, pressed: true, modifiers, repeat: false, .. } => {
+                                    Some((*key, *modifiers))
+                                }
+                                _ => None,
+                            })
+                        });
+                        ui.add_enabled(false, egui::TextEdit::singleline(&mut d.cfg.hotkey.clone()).desired_width(180.0));
+                        if ui.button("中止").clicked() {
+                            d.capturing_key = false;
+                        }
+                        ui.weak("使いたいキーの組み合わせを押してください");
+                        if let Some((key, m)) = pressed {
+                            if key != Key::Escape {
+                                match hotkey_text(key, m) {
+                                    Some(t) => {
+                                        d.cfg.hotkey = t;
+                                        d.msg.clear();
+                                    }
+                                    None => d.msg = "そのキーはホットキーに使えません(Ctrl や Alt を併用してください)".into(),
+                                }
+                            }
+                            d.capturing_key = false;
+                        }
+                    } else {
+                        ui.add(egui::TextEdit::singleline(&mut d.cfg.hotkey).desired_width(180.0));
+                        if ui.button("キーを押して設定").clicked() {
+                            d.capturing_key = true;
+                        }
+                    }
+                });
                 ui.end_row();
                 ui.label("起動");
                 ui.checkbox(&mut d.cfg.autostart, "Windows の起動時に自動で起動する");
@@ -435,11 +497,11 @@ impl App {
                 ui.end_row();
             });
             ui.add_space(10.0);
-            ui.weak("ホットキーの変更は再起動後に反映されます。");
             ui.weak(format!("設定ファイル: {}", crate::config::ini_path().display()));
             });
         });
         if save {
+            d.cfg.hotkey = d.cfg.hotkey.trim().to_string();
             if d.cfg.hotkey.parse::<global_hotkey::hotkey::HotKey>().is_err() {
                 d.msg = "ホットキーの書式が不正です (例: ctrl+shift+s)".into();
             } else if crate::config::format_name(&d.cfg.name_pattern).is_none() {
@@ -456,18 +518,24 @@ impl App {
                 // 更新確認の記録は、設定画面を開いている間に更新されていることがあるので引き継ぐ
                 d.cfg.last_update_check = self.cfg.last_update_check;
                 d.cfg.latest_version = self.cfg.latest_version.clone();
-                // 自動起動の登録を先に反映する。失敗したら、設定は保存せずに理由を見せる
-                match crate::autostart::sync(d.cfg.autostart) {
-                    Err(e) => d.msg = e,
-                    Ok(()) => match crate::config::save(&d.cfg) {
-                        Ok(()) => {
-                            self.cfg = d.cfg;
-                            self.refresh_update_badge();
-                            self.go_idle(ctx);
-                            return Mode::Idle;
-                        }
-                        Err(e) => d.msg = format!("INIを保存できません: {e}"),
-                    },
+                // ホットキーは実際に登録してみる。失敗したら、設定は保存せずに理由を見せる
+                // 自動起動の登録も先に反映する。失敗したら同様に保存しない
+                let applied = self.tray.set_hotkey(&d.cfg.hotkey).and_then(|()| {
+                    crate::autostart::sync(d.cfg.autostart)
+                        .and_then(|()| crate::config::save(&d.cfg).map_err(|e| format!("INIを保存できません: {e}")))
+                });
+                match applied {
+                    Ok(()) => {
+                        self.cfg = d.cfg;
+                        self.refresh_update_badge();
+                        self.go_idle(ctx);
+                        return Mode::Idle;
+                    }
+                    Err(e) => {
+                        d.msg = e;
+                        // 保存に至らなかったので、ホットキーも元に戻す(失敗しても元の登録が残る)
+                        let _ = self.tray.set_hotkey(&self.cfg.hotkey);
+                    }
                 }
             }
         }
@@ -1053,6 +1121,40 @@ fn key_held(ctx: &Context, name: &str) -> bool {
 }
 
 /// 設定画面での入力チェック用。
+/// 押されたキーと修飾キーから、ホットキーの文字列(例: "ctrl+shift+s")を作る。
+/// 修飾キー無しの文字キーは、入力を奪ってしまうので受け付けない(F1〜F24 だけは単独で可)。
+fn hotkey_text(key: Key, m: Modifiers) -> Option<String> {
+    let name = match key {
+        Key::ArrowUp => "up".to_string(),
+        Key::ArrowDown => "down".to_string(),
+        Key::ArrowLeft => "left".to_string(),
+        Key::ArrowRight => "right".to_string(),
+        Key::Escape => return None,
+        k => {
+            let n = k.name();
+            // 数字キーは "Num1" のように返るので、数字だけにする
+            n.strip_prefix("Num").filter(|d| d.len() == 1).unwrap_or(n).to_ascii_lowercase()
+        }
+    };
+    let is_fkey = name.strip_prefix("f").is_some_and(|d| d.parse::<u32>().is_ok());
+    if !(m.ctrl || m.alt || m.shift || is_fkey) {
+        return None;
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    if m.ctrl {
+        parts.push("ctrl");
+    }
+    if m.alt {
+        parts.push("alt");
+    }
+    if m.shift {
+        parts.push("shift");
+    }
+    parts.push(&name);
+    let text = parts.join("+");
+    text.parse::<global_hotkey::hotkey::HotKey>().is_ok().then_some(text)
+}
+
 fn valid_key_name(name: &str) -> bool {
     let n = name.trim();
     n.is_empty()
@@ -1277,5 +1379,22 @@ mod tests {
         assert_eq!(img.get_pixel(39, 29).0[3], 0);
         assert_eq!(img.get_pixel(20, 15).0[3], 255);
         assert_eq!(img.get_pixel(8, 0).0[3], 255);
+    }
+}
+
+#[cfg(test)]
+mod hotkey_tests {
+    use super::hotkey_text;
+    use egui::{Key, Modifiers};
+
+    #[test]
+    fn builds_parseable_hotkey_text() {
+        let m = Modifiers { ctrl: true, shift: true, ..Default::default() };
+        assert_eq!(hotkey_text(Key::S, m).as_deref(), Some("ctrl+shift+s"));
+        assert_eq!(hotkey_text(Key::Num1, Modifiers { alt: true, ..Default::default() }).as_deref(), Some("alt+1"));
+        assert_eq!(hotkey_text(Key::F9, Modifiers::NONE).as_deref(), Some("f9"));
+        assert_eq!(hotkey_text(Key::ArrowUp, m).as_deref(), Some("ctrl+shift+up"));
+        // 修飾キー無しの文字キーは、入力を奪うので不可
+        assert_eq!(hotkey_text(Key::S, Modifiers::NONE), None);
     }
 }

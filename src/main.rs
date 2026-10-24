@@ -19,7 +19,7 @@ mod winutil;
 
 use anyhow::{Result, anyhow};
 use app::{App, Cmd, Tray};
-use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use std::sync::{Arc, mpsc};
 use tray_icon::{
     Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
@@ -87,7 +87,6 @@ fn run() -> Result<()> {
     if let Err(e) = autostart::sync(cfg.autostart) {
         eprintln!("autostart: {e}");
     }
-    let hotkey: HotKey = cfg.hotkey.parse().map_err(|e| anyhow!("ホットキー設定が不正です ({}): {e}", cfg.hotkey))?;
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -110,7 +109,6 @@ fn run() -> Result<()> {
 
             // グローバルホットキー(イベントループのあるこのスレッドで登録する必要がある)
             let manager = GlobalHotKeyManager::new()?;
-            manager.register(hotkey)?;
             {
                 let (tx, ctx) = (tx.clone(), cc.egui_ctx.clone());
                 GlobalHotKeyEvent::set_event_handler(Some(move |e: GlobalHotKeyEvent| {
@@ -123,7 +121,7 @@ fn run() -> Result<()> {
 
             // タスクトレイ
             let menu = Menu::new();
-            let capture_item = MenuItem::new(format!("スクショを撮る ({})", app_cfg.hotkey), true, None);
+            let capture_item = MenuItem::new("スクショを撮る", true, None);
             let album_item = MenuItem::new("アルバムを開く", true, None);
             let folder_item = MenuItem::new("保存フォルダを開く", true, None);
             let config_item = MenuItem::new("設定...", true, None);
@@ -185,10 +183,16 @@ fn run() -> Result<()> {
             if let Some(icon) = tray_icon_image(false) {
                 tray = tray.with_icon(icon);
             }
-            let tray = Tray { icon: tray.build()?, update_item };
-
-            // ホットキーはアプリが生きている間ずっと保持する
-            std::mem::forget(manager);
+            let mut tray = Tray { icon: tray.build()?, update_item, capture_item, hotkeys: manager, hotkey: None };
+            // ホットキーを登録できなくても終了はしない。トレイは使えるようにして、設定画面で直してもらう
+            let startup_msg = match tray.set_hotkey(&app_cfg.hotkey) {
+                Ok(()) => String::new(),
+                Err(e) => {
+                    let _ = tx.send(Cmd::Settings);
+                    tray.capture_item.set_text("スクショを撮る(ホットキー未設定)");
+                    format!("{e}\n別のホットキーを設定してください。")
+                }
+            };
 
             // `--album` / `--settings` で起動すると、最初にアルバム / 設定を開く
             if std::env::args().skip(1).any(|a| a == "--album") {
@@ -197,7 +201,7 @@ fn run() -> Result<()> {
                 let _ = tx.send(Cmd::Settings);
             }
 
-            Ok(Box::new(App::new(app_cfg, rx, tx, tray)))
+            Ok(Box::new(App::new(app_cfg, rx, tx, tray, startup_msg)))
         }),
     )
     .map_err(|e| anyhow!("{e}"))
