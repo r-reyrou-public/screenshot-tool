@@ -187,6 +187,8 @@ pub struct App {
     pending_window: Option<PendingWindow>,
     /// スクロール撮影の待機中: (始める時刻, 範囲(物理座標の left, top, right, bottom))
     pending_scroll: Option<(Instant, (i32, i32, i32, i32))>,
+    /// アルバムを見ている間、あずかっている編集中のエディタ(と、その大きさ・位置)
+    parked: Option<(Editor, egui::Vec2, Option<egui::Pos2>)>,
     /// UI Automation(要素検出)。最初に必要になったときに作る
     uia: Option<Uia>,
     quitting: bool,
@@ -218,6 +220,7 @@ impl App {
             tx,
             trim_at: Some(Instant::now() + Duration::from_secs(3)),
             pending_scroll: None,
+            parked: None,
             startup_msg,
         };
         app.refresh_update_badge();
@@ -258,6 +261,7 @@ impl App {
     fn open_settings(&mut self, ctx: &Context) {
         self.maybe_check_update(ctx);
         self.pending_capture = None;
+        self.parked = None;
         self.mode = Mode::Settings(SettingsDraft {
             dir: self.cfg.save_dir.display().to_string(),
             cfg: self.cfg.clone(),
@@ -278,11 +282,15 @@ impl App {
         if matches!(self.mode, Mode::Selecting(_)) {
             self.go_idle(ctx);
         }
-        // 編集中は、撮った画像や編集内容を失わないよう、開かずに理由を出す
-        if let Mode::Editing(e) = &mut self.mode {
-            e.status = "編集中はアルバムを開けません。「完了」か「破棄」のあとに開いてください".into();
-            ctx.send_viewport_cmd(ViewportCommand::Focus);
-            return;
+        // 編集中は、編集内容を残したままあずかり、アルバムを閉じたときに元の編集画面へ戻す
+        if matches!(self.mode, Mode::Editing(_)) {
+            let (size, pos) = ctx.input(|i| {
+                let v = i.viewport();
+                (v.inner_rect.map_or(vec2(980.0, 640.0), |r| r.size()), v.outer_rect.map(|r| r.min))
+            });
+            if let Mode::Editing(e) = std::mem::replace(&mut self.mode, Mode::Idle) {
+                self.parked = Some((e, size, pos));
+            }
         }
         self.pending_capture = None;
         let newest_first = match &self.mode {
@@ -297,13 +305,33 @@ impl App {
         ctx.send_viewport_cmd(ViewportCommand::Focus);
     }
 
+    /// あずかっていた編集画面を、元の大きさ・位置で戻す
+    fn restore_parked(&mut self, ctx: &Context) -> Option<Mode> {
+        let (e, size, pos) = self.parked.take()?;
+        ctx.send_viewport_cmd(ViewportCommand::WindowLevel(WindowLevel::Normal));
+        ctx.send_viewport_cmd(ViewportCommand::Decorations(true));
+        ctx.send_viewport_cmd(ViewportCommand::Title("SnapMark".into()));
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
+        if let Some(p) = pos {
+            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(p));
+        }
+        ctx.send_viewport_cmd(ViewportCommand::Focus);
+        Some(Mode::Editing(e))
+    }
+
     fn album_ui(&mut self, root: &mut egui::Ui, mut a: Album) -> Mode {
         let ctx = &root.ctx().clone();
         let (outcome, reorder) = a.ui(root);
         match outcome {
             album::Outcome::Close => {
+                if let Some(m) = self.restore_parked(ctx) {
+                    return m;
+                }
                 self.go_idle(ctx);
                 return Mode::Idle;
+            }
+            album::Outcome::Edit(_) if self.parked.is_some() => {
+                a.set_status("編集中の画像があるため、ここからは編集できません(Esc で編集画面へ戻ります)".into());
             }
             album::Outcome::Edit(path) => match image::open(&path) {
                 Ok(img) => {
@@ -622,6 +650,11 @@ impl App {
         self.maybe_check_update(ctx);
         if matches!(self.mode, Mode::Idle) {
             self.begin_selection(ctx);
+        } else if matches!(self.mode, Mode::Album(_)) && self.parked.is_some() {
+            // 編集中の画像を失わないよう、撮影ではなく編集画面へ戻す
+            if let Some(m) = self.restore_parked(ctx) {
+                self.mode = m;
+            }
         } else {
             self.go_idle(ctx);
             self.pending_capture = Some(Instant::now() + Duration::from_millis(150));
