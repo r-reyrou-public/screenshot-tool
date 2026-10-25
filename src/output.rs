@@ -51,6 +51,40 @@ pub fn save(img: &RgbaImage, cfg: &Config) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// 保存する。設定の保存先に書けないとき(OneDrive の画像フォルダを作れないなど)は、
+/// ホームの `SnapMark` に保存し、設定の保存先もそちらへ改める(戻り値の真偽は、保存先を変えたか)。
+pub fn save_or_fallback(img: &RgbaImage, cfg: &mut Config) -> Result<(PathBuf, bool)> {
+    match save(img, cfg) {
+        Ok(p) => Ok((p, false)),
+        Err(first) => {
+            let alt = dirs::home_dir().map(|h| h.join("SnapMark")).filter(|a| *a != cfg.save_dir);
+            let Some(alt) = alt else { return Err(first) };
+            let prev = std::mem::replace(&mut cfg.save_dir, alt);
+            match save(img, cfg) {
+                Ok(p) => Ok((p, true)),
+                Err(_) => {
+                    cfg.save_dir = prev;
+                    Err(first)
+                }
+            }
+        }
+    }
+}
+
+/// 保存先フォルダを作れるようにしておく。作れないとき(OneDrive の画像フォルダが使えないなど)は、
+/// ホームの `SnapMark` に改める。改めたら true(設定ファイルへの書き戻しは呼び出し側)。
+pub fn ensure_save_dir(cfg: &mut Config) -> bool {
+    if std::fs::create_dir_all(&cfg.save_dir).is_ok() {
+        return false;
+    }
+    let Some(alt) = dirs::home_dir().map(|h| h.join("SnapMark")) else { return false };
+    if alt != cfg.save_dir && std::fs::create_dir_all(&alt).is_ok() {
+        cfg.save_dir = alt;
+        return true;
+    }
+    false
+}
+
 pub fn copy_to_clipboard(img: &RgbaImage) -> Result<()> {
     let mut cb = arboard::Clipboard::new()?;
     cb.set_image(arboard::ImageData {

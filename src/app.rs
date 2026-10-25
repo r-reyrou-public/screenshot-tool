@@ -205,7 +205,13 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, tray: Tray, startup_msg: String) -> Self {
+    pub fn new(mut cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, tray: Tray, startup_msg: String) -> Self {
+        // 保存先を作れない環境でも、保存・アルバム・フォルダを開く操作が使えるようにしておく
+        if output::ensure_save_dir(&mut cfg)
+            && let Err(e) = crate::config::save(&cfg)
+        {
+            eprintln!("ini write failed: {e}");
+        }
         let mut app = Self {
             cfg,
             rx,
@@ -1219,11 +1225,17 @@ impl App {
             }
             Outcome::Finish => {
                 let out = output::apply_resolution(&e.final_image(), &self.cfg);
-                let saved = output::save(&out, &self.cfg);
+                let saved = output::save_or_fallback(&out, &mut self.cfg);
                 let copied = output::copy_to_clipboard(&out);
                 match (saved, copied) {
-                    (Ok(path), Ok(())) => {
-                        let _ = path;
+                    (Ok((_, moved)), Ok(())) => {
+                        if moved {
+                            // 元の保存先に書けなかったので、新しい保存先を覚え、開いて知らせる
+                            if let Err(err) = crate::config::save(&self.cfg) {
+                                eprintln!("ini write failed: {err}");
+                            }
+                            crate::winutil::open_in_explorer(&self.cfg.save_dir);
+                        }
                         self.go_idle(ctx);
                         return Mode::Idle;
                     }
