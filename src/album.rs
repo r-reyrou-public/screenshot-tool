@@ -107,10 +107,6 @@ impl Album {
         self.status = s;
     }
 
-    pub fn newest_first(&self) -> bool {
-        self.newest_first
-    }
-
     /// サムネイルの読み込みをバックグラウンドで進める(表示枚数を `BATCH` 枚ずつ増やす)。
     fn show_more(&mut self, ctx: &Context) {
         let from = self.shown;

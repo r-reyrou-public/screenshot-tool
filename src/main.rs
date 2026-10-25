@@ -51,7 +51,7 @@ pub fn tray_icon_image(badge: bool) -> Option<Icon> {
     Icon::from_rgba(rgba, w, h).ok()
 }
 
-fn window_icon() -> egui::IconData {
+pub fn window_icon() -> egui::IconData {
     let (rgba, width, height) = app_icon_rgba(false).unwrap_or((vec![0; 4], 1, 1));
     egui::IconData { rgba, width, height }
 }

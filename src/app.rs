@@ -23,6 +23,8 @@ pub enum Cmd {
     OpenUpdatePage,
     /// スクロール撮影の結果(つないだ画像と、撮ったモニタの矩形)。中止や失敗は `None`
     ScrollDone(Option<(image::RgbaImage, (i32, i32, u32, u32))>),
+    /// アルバムで選んだ画像を、編集画面で開く
+    EditFile(std::path::PathBuf),
     Quit,
 }
 
@@ -148,31 +150,42 @@ const SETTINGS_SIZE: egui::Vec2 = vec2(600.0, 800.0);
 const ALBUM_SIZE: egui::Vec2 = vec2(1040.0, 720.0);
 
 /// ウィンドウを、カーソルのあるモニタの中央に置く。
-fn center_window(ctx: &Context, size: egui::Vec2) {
+fn centered_pos(ctx: &Context, size: egui::Vec2) -> Pos2 {
     let ppp = ctx.pixels_per_point();
-    let pos = match capture::cursor_monitor_rect() {
+    match capture::cursor_monitor_rect() {
         Some((x, y, w, h)) => pos2(
             (x as f32 + (w as f32 - size.x * ppp) / 2.0) / ppp,
             (y as f32 + (h as f32 - size.y * ppp) / 2.0) / ppp,
         ),
         None => pos2(200.0, 120.0),
-    };
+    }
+}
+
+fn center_window(ctx: &Context, size: egui::Vec2) {
     ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
-    ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
+    ctx.send_viewport_cmd(ViewportCommand::OuterPosition(centered_pos(ctx, size)));
+}
+
+fn settings_viewport() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("snapmark-settings")
+}
+
+fn album_viewport() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("snapmark-album")
 }
 
 fn center_settings(ctx: &Context) {
     center_window(ctx, SETTINGS_SIZE);
 }
 
-/// 画面の状態。値は mem::replace で受け渡すだけの短命な値なので、大きさの差は許容する。
+/// メインのウィンドウの状態(撮影の範囲選択と、撮影後の編集は、同じウィンドウを使うので同時には出ない)。
+/// 設定・アルバムは別のウィンドウで、これとは独立に出る。
+/// 値は mem::replace で受け渡すだけの短命な値なので、大きさの差は許容する。
 #[allow(clippy::large_enum_variant)]
 enum Mode {
     Idle,
-    Settings(SettingsDraft),
     Selecting(Selecting),
     Editing(Editor),
-    Album(Album),
 }
 
 /// ウィンドウ撮影の予約: (撮る時刻, 範囲(物理座標), 角丸の半径)
@@ -187,8 +200,12 @@ pub struct App {
     pending_window: Option<PendingWindow>,
     /// スクロール撮影の待機中: (始める時刻, 範囲(物理座標の left, top, right, bottom))
     pending_scroll: Option<(Instant, (i32, i32, i32, i32))>,
-    /// アルバムを見ている間、あずかっている編集中のエディタ(と、その大きさ・位置)
-    parked: Option<(Editor, egui::Vec2, Option<egui::Pos2>)>,
+    /// 設定ウィンドウ(開いている間だけ)と、その表示位置
+    settings: Option<SettingsDraft>,
+    settings_pos: Pos2,
+    /// アルバムウィンドウ(開いている間だけ)と、その表示位置
+    album: Option<Album>,
+    album_pos: Pos2,
     /// UI Automation(要素検出)。最初に必要になったときに作る
     uia: Option<Uia>,
     quitting: bool,
@@ -226,7 +243,10 @@ impl App {
             tx,
             trim_at: Some(Instant::now() + Duration::from_secs(3)),
             pending_scroll: None,
-            parked: None,
+            settings: None,
+            settings_pos: Pos2::ZERO,
+            album: None,
+            album_pos: Pos2::ZERO,
             startup_msg,
         };
         app.refresh_update_badge();
@@ -266,9 +286,12 @@ impl App {
 
     fn open_settings(&mut self, ctx: &Context) {
         self.maybe_check_update(ctx);
-        self.pending_capture = None;
-        self.parked = None;
-        self.mode = Mode::Settings(SettingsDraft {
+        if self.settings.is_some() {
+            ctx.send_viewport_cmd_to(settings_viewport(), ViewportCommand::Focus);
+            return;
+        }
+        self.settings_pos = centered_pos(ctx, SETTINGS_SIZE);
+        self.settings = Some(SettingsDraft {
             dir: self.cfg.save_dir.display().to_string(),
             cfg: self.cfg.clone(),
             msg: std::mem::take(&mut self.startup_msg),
@@ -276,85 +299,80 @@ impl App {
             capturing_key: false,
             capture_op: None,
         });
-        ctx.send_viewport_cmd(ViewportCommand::WindowLevel(WindowLevel::Normal));
-        ctx.send_viewport_cmd(ViewportCommand::Decorations(true));
-        ctx.send_viewport_cmd(ViewportCommand::Title("設定".into()));
-        center_settings(ctx);
-        ctx.send_viewport_cmd(ViewportCommand::Focus);
+        ctx.request_repaint();
     }
 
     fn open_album(&mut self, ctx: &Context) {
-        // 範囲選択中は、選択をやめてから開く(全画面の覆いが前面にあって、アルバムが見えないため)
-        if matches!(self.mode, Mode::Selecting(_)) {
-            self.go_idle(ctx);
+        if self.album.is_some() {
+            ctx.send_viewport_cmd_to(album_viewport(), ViewportCommand::Focus);
+            return;
         }
-        // 編集中は、編集内容を残したままあずかり、アルバムを閉じたときに元の編集画面へ戻す
-        if matches!(self.mode, Mode::Editing(_)) {
-            let (size, pos) = ctx.input(|i| {
-                let v = i.viewport();
-                (v.inner_rect.map_or(vec2(980.0, 640.0), |r| r.size()), v.outer_rect.map(|r| r.min))
-            });
-            if let Mode::Editing(e) = std::mem::replace(&mut self.mode, Mode::Idle) {
-                self.parked = Some((e, size, pos));
-            }
-        }
-        self.pending_capture = None;
-        let newest_first = match &self.mode {
-            Mode::Album(a) => a.newest_first(),
-            _ => true,
-        };
-        self.mode = Mode::Album(Album::open(ctx, &self.cfg.save_dir, newest_first));
-        ctx.send_viewport_cmd(ViewportCommand::WindowLevel(WindowLevel::Normal));
-        ctx.send_viewport_cmd(ViewportCommand::Decorations(true));
-        ctx.send_viewport_cmd(ViewportCommand::Title("SnapMark - アルバム".into()));
-        center_window(ctx, ALBUM_SIZE);
-        ctx.send_viewport_cmd(ViewportCommand::Focus);
+        self.album_pos = centered_pos(ctx, ALBUM_SIZE);
+        self.album = Some(Album::open(ctx, &self.cfg.save_dir, true));
+        ctx.request_repaint();
     }
 
-    /// あずかっていた編集画面を、元の大きさ・位置で戻す
-    fn restore_parked(&mut self, ctx: &Context) -> Option<Mode> {
-        let (e, size, pos) = self.parked.take()?;
-        ctx.send_viewport_cmd(ViewportCommand::WindowLevel(WindowLevel::Normal));
-        ctx.send_viewport_cmd(ViewportCommand::Decorations(true));
-        ctx.send_viewport_cmd(ViewportCommand::Title("SnapMark".into()));
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
-        if let Some(p) = pos {
-            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(p));
-        }
-        ctx.send_viewport_cmd(ViewportCommand::Focus);
-        Some(Mode::Editing(e))
-    }
-
-    fn album_ui(&mut self, root: &mut egui::Ui, mut a: Album) -> Mode {
+    fn album_ui(&mut self, root: &mut egui::Ui, mut a: Album) -> Option<Album> {
         let ctx = &root.ctx().clone();
         let (outcome, reorder) = a.ui(root);
+        let close = ctx.input(|i| i.viewport().close_requested());
         match outcome {
-            album::Outcome::Close => {
-                if let Some(m) = self.restore_parked(ctx) {
-                    return m;
-                }
-                self.go_idle(ctx);
-                return Mode::Idle;
+            album::Outcome::Close => return self.close_child(),
+            _ if close => return self.close_child(),
+            album::Outcome::Edit(path) => {
+                // 編集画面はメインのウィンドウで開くので、そちらへ頼む
+                let _ = self.tx.send(Cmd::EditFile(path));
+                ctx.request_repaint_of(egui::ViewportId::ROOT);
             }
-            album::Outcome::Edit(_) if self.parked.is_some() => {
-                a.set_status("編集中の画像があるため、ここからは編集できません(Esc で編集画面へ戻ります)".into());
-            }
-            album::Outcome::Edit(path) => match image::open(&path) {
-                Ok(img) => {
-                    let monitor = capture::cursor_monitor_rect();
-                    return self.open_editor(ctx, img.to_rgba8(), monitor);
-                }
-                Err(e) => a.set_status(format!("画像を開けません: {e}")),
-            },
             album::Outcome::None => {}
         }
         if let Some(newest_first) = reorder {
-            return Mode::Album(Album::open(ctx, &self.cfg.save_dir, newest_first));
+            return Some(Album::open(ctx, &self.cfg.save_dir, newest_first));
         }
-        Mode::Album(a)
+        Some(a)
     }
 
-    fn settings_ui(&mut self, root: &mut egui::Ui, mut d: SettingsDraft) -> Mode {
+    /// 設定・アルバムのウィンドウを閉じたあと(使い終わったメモリを返す予約)
+    fn close_child(&mut self) -> Option<Album> {
+        self.trim_at = Some(Instant::now() + Duration::from_millis(1500));
+        None
+    }
+
+    /// 設定・アルバムの別ウィンドウを描く。閉じられたら状態を捨てる。
+    fn show_children(&mut self, ctx: &Context) {
+        if let Some(d) = self.settings.take() {
+            let mut slot = Some(d);
+            let mut next = None;
+            let builder = egui::ViewportBuilder::default()
+                .with_title("設定")
+                .with_icon(crate::window_icon())
+                .with_inner_size(SETTINGS_SIZE)
+                .with_position(self.settings_pos);
+            ctx.show_viewport_immediate(settings_viewport(), builder, |ui, _| {
+                if let Some(d) = slot.take() {
+                    next = self.settings_ui(ui, d);
+                }
+            });
+            self.settings = next.or(slot);
+        }
+        if let Some(a) = self.album.take() {
+            let mut slot = Some(a);
+            let mut next = None;
+            let builder = egui::ViewportBuilder::default()
+                .with_title("SnapMark - アルバム")
+                .with_icon(crate::window_icon())
+                .with_inner_size(ALBUM_SIZE)
+                .with_position(self.album_pos);
+            ctx.show_viewport_immediate(album_viewport(), builder, |ui, _| {
+                if let Some(a) = slot.take() {
+                    next = self.album_ui(ui, a);
+                }
+            });
+            self.album = next.or(slot);
+        }
+    }
+
+    fn settings_ui(&mut self, root: &mut egui::Ui, mut d: SettingsDraft) -> Option<SettingsDraft> {
         let ctx = &root.ctx().clone();
         // DPI の異なるモニタへ移った直後はずれるので、数フレームは中央に合わせ直す
         if d.frames < 6 {
@@ -363,6 +381,7 @@ impl App {
             ctx.request_repaint();
         }
         let mut cancel = !d.capturing_key && d.capture_op.is_none() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+        cancel |= ctx.input(|i| i.viewport().close_requested());
         let mut save = false;
         let was_capturing = d.capturing_key;
         egui::Panel::bottom("about").resizable(false).show(root, |ui| {
@@ -631,8 +650,8 @@ impl App {
                     Ok(()) => {
                         self.cfg = d.cfg;
                         self.refresh_update_badge();
-                        self.go_idle(ctx);
-                        return Mode::Idle;
+                        self.trim_at = Some(Instant::now() + Duration::from_millis(1500));
+                        return None;
                     }
                     Err(e) => {
                         d.msg = e;
@@ -643,10 +662,10 @@ impl App {
             }
         }
         if cancel {
-            self.go_idle(ctx);
-            return Mode::Idle;
+            self.trim_at = Some(Instant::now() + Duration::from_millis(1500));
+            return None;
         }
-        Mode::Settings(d)
+        Some(d)
     }
 
     /// 撮影要求。待機中なら即座に撮る。編集・設定ウィンドウが開いている場合だけ、
@@ -656,11 +675,6 @@ impl App {
         self.maybe_check_update(ctx);
         if matches!(self.mode, Mode::Idle) {
             self.begin_selection(ctx);
-        } else if matches!(self.mode, Mode::Album(_)) && self.parked.is_some() {
-            // 編集中の画像を失わないよう、撮影ではなく編集画面へ戻す
-            if let Some(m) = self.restore_parked(ctx) {
-                self.mode = m;
-            }
         } else {
             self.go_idle(ctx);
             self.pending_capture = Some(Instant::now() + Duration::from_millis(150));
@@ -1507,6 +1521,22 @@ impl eframe::App for App {
                     }
                 }
                 Cmd::OpenUpdatePage => crate::winutil::open_release_page(),
+                Cmd::EditFile(path) => match image::open(&path) {
+                    Ok(img) if matches!(self.mode, Mode::Idle) => {
+                        let monitor = capture::cursor_monitor_rect();
+                        self.mode = self.open_editor(ctx, img.to_rgba8(), monitor);
+                    }
+                    Ok(_) => {
+                        if let Some(a) = &mut self.album {
+                            a.set_status("撮影中・編集中の画面があります。先にそれを終えてください".into());
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(a) = &mut self.album {
+                            a.set_status(format!("画像を開けません: {e}"));
+                        }
+                    }
+                },
                 Cmd::ScrollDone(done) => {
                     if let Some((img, monitor)) = done {
                         self.mode = self.open_editor(ctx, img, Some(monitor));
@@ -1521,6 +1551,7 @@ impl eframe::App for App {
 
         if let Some(at) = self.trim_at
             && matches!(self.mode, Mode::Idle)
+            && self.album.is_none()
             && Instant::now() >= at
         {
             crate::winutil::trim_memory();
@@ -1586,12 +1617,11 @@ impl eframe::App for App {
             }
             Mode::Selecting(s) => self.selecting_ui(ui, s),
             Mode::Editing(e) => self.editing_ui(ui, e),
-            Mode::Settings(d) => self.settings_ui(ui, d),
-            Mode::Album(a) => self.album_ui(ui, a),
         };
+        self.show_children(ctx);
 
-        // 編集・設定ウィンドウは他のウィンドウに隠れても Alt+Tab で戻れるようにする
-        let listed = matches!(self.mode, Mode::Editing(_) | Mode::Settings(_) | Mode::Album(_));
+        // 編集ウィンドウは他のウィンドウに隠れても Alt+Tab で戻れるようにする
+        let listed = matches!(self.mode, Mode::Editing(_));
         crate::winutil::set_listed(frame, listed);
     }
 }
