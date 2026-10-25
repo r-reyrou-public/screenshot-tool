@@ -6,6 +6,7 @@ mod autostart;
 mod capture;
 mod config;
 mod editor;
+mod hdr;
 mod icons;
 mod output;
 mod raster;
