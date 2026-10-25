@@ -20,9 +20,30 @@ fn changed_cols(a: &RgbaImage, b: &RgbaImage) -> Option<(usize, usize)> {
         }
     }
     let min = (h / 10).max(2);
-    let first = count.iter().position(|&c| c >= min)?;
-    let last = count.iter().rposition(|&c| c >= min)?;
-    Some((first, last + 1))
+    // 動いた列を、近いもの同士(隙間 GAP 列まで)で塊にし、いちばん幅の広い塊を返す。
+    // 端に写り込んだ別のウィンドウなどで、離れた列まで動いたことになるのを防ぐ
+    const GAP: usize = 40;
+    let mut best: Option<(usize, usize)> = None;
+    let mut run: Option<(usize, usize)> = None;
+    for x in (0..w).filter(|&x| count[x] >= min) {
+        run = match run {
+            Some((f, l)) if x - l <= GAP => Some((f, x)),
+            _ => {
+                best = widest(best, run);
+                Some((x, x))
+            }
+        };
+    }
+    best = widest(best, run);
+    best.map(|(f, l)| (f, l + 1))
+}
+
+fn widest(a: Option<(usize, usize)>, b: Option<(usize, usize)>) -> Option<(usize, usize)> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(if y.1 - y.0 > x.1 - x.0 { y } else { x }),
+        (x, None) => x,
+        (None, y) => y,
+    }
 }
 
 /// 列 `x` が、上から下まで同じ色か
@@ -240,7 +261,22 @@ pub fn capture_scrolling(rect: (i32, i32, i32, i32)) -> Option<RgbaImage> {
     pause(150);
     let first = grab_settled(rect)?;
     let (cx, cy) = find_scroll_point(rect, &first);
-    let mut st = Stitcher::new(grab_settled(rect).unwrap_or(first));
+    // 途中までスクロールされていても、上端から撮るために先頭まで戻す
+    let mut top = grab_settled(rect).unwrap_or(first);
+    for _ in 0..40 {
+        if esc_pressed() {
+            return None;
+        }
+        set_cursor(cx, cy);
+        wheel(-10);
+        pause(250);
+        let Some(now) = grab_settled(rect) else { break };
+        if now.as_raw() == top.as_raw() {
+            break;
+        }
+        top = now;
+    }
+    let mut st = Stitcher::new(top);
     // 1回の送りが範囲の半分くらいになるように、最初の結果を見て刻みを合わせる
     let mut notches = if height < 400 { 1 } else { 3 };
     let mut tuned = false;
@@ -332,6 +368,29 @@ mod tests {
         assert_eq!(out.get_pixel(0, 0), &Rgba([9, 9, 200, 255]));
         assert_eq!(out.get_pixel(0, 399), &Rgba([200, 0, 9, 255]));
         assert_eq!(out.get_pixel(0, 250), p.get_pixel(0, 250));
+    }
+
+    #[test]
+    fn ignores_noise_strip_at_the_edge() {
+        let p = page(700, 40);
+        // 左端の 6 列は、スクロールとは無関係に毎回変わる(別のウィンドウが写り込んだ縁)。次に 50 列のサイドバー
+        let frame = |top: u32, noise: u32| {
+            RgbaImage::from_fn(96, 200, |x, y| {
+                if x < 6 {
+                    Rgba([(y * 5 + noise * 37) as u8, noise as u8, 1, 255])
+                } else if x < 56 {
+                    Rgba([(y * 13 % 251) as u8, 90, (x * 40) as u8, 255])
+                } else {
+                    *p.get_pixel(x - 56, y + top)
+                }
+            })
+        };
+        let mut st = Stitcher::new(frame(0, 0));
+        assert!(matches!(st.push(frame(120, 1)), Step::Added(120)));
+        assert!(matches!(st.push(frame(240, 2)), Step::Added(120)));
+        let out = st.finish();
+        assert_eq!(out.dimensions(), (40, 440));
+        assert_eq!(out.as_raw(), view(&p, 0, 440).as_raw());
     }
 
     #[test]

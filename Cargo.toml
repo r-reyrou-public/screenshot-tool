@@ -1,6 +1,6 @@
 [package]
 name = "snapmark"
-version = "0.8.7"
+version = "0.8.8"
 license = "Apache-2.0"
 repository = "https://github.com/r-reyrou-public/screenshot-tool"
 edition = "2024"
