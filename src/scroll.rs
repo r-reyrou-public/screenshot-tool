@@ -9,11 +9,33 @@ const MAX_HEIGHT: usize = 30_000;
 /// 送りの最大回数
 const MAX_STEPS: usize = 80;
 
-/// 1行ぶんの特徴: (ハッシュ, 全画素が同じ色か)。
-/// 右端はスクロールバー(つまみが動く)なので、比べる対象から外す。
-fn row_info(img: &RgbaImage) -> Vec<(u64, bool)> {
+/// 2枚の間で、見た目が変わった列の範囲 (左, 右)(右は含まない)。
+/// 動いた行が1割に満たない列(点滅するカーソルなど)は、変わったとは数えない。
+fn changed_cols(a: &RgbaImage, b: &RgbaImage) -> Option<(usize, usize)> {
+    let (w, h) = (a.width() as usize, a.height() as usize);
+    let mut count = vec![0usize; w];
+    for (ra, rb) in a.as_raw().chunks_exact(w * 4).zip(b.as_raw().chunks_exact(w * 4)) {
+        for (x, (pa, pb)) in ra.as_chunks::<4>().0.iter().zip(rb.as_chunks::<4>().0).enumerate() {
+            count[x] += usize::from(pa != pb);
+        }
+    }
+    let min = (h / 10).max(2);
+    let first = count.iter().position(|&c| c >= min)?;
+    let last = count.iter().rposition(|&c| c >= min)?;
+    Some((first, last + 1))
+}
+
+/// 列 `x` が、上から下まで同じ色か
+fn column_is_uniform(img: &RgbaImage, x: usize) -> bool {
     let w = img.width() as usize;
-    let (x0, x1) = (w / 50, w - (w / 25).clamp(1, 24).min(w / 3));
+    let raw = img.as_raw();
+    let first = &raw[x * 4..x * 4 + 4];
+    raw.chunks_exact(w * 4).all(|row| &row[x * 4..x * 4 + 4] == first)
+}
+
+/// 1行ぶんの特徴: (ハッシュ, 全画素が同じ色か)。比べるのは列 `x0..x1` だけ。
+fn row_info(img: &RgbaImage, (x0, x1): (usize, usize)) -> Vec<(u64, bool)> {
+    let w = img.width() as usize;
     img.as_raw()
         .chunks_exact(w * 4)
         .map(|row| {
@@ -46,11 +68,15 @@ pub struct Stitcher {
     prev: RgbaImage,
     /// 画面の上端・下端の、スクロールしても動かない部分(ヘッダーやステータスバー)の行数。最初の送りで決める
     bands: Option<(usize, usize)>,
+    /// 比べる列の範囲(動いた列から、右端のスクロールバーを除いたもの)。最初の送りで決める
+    cols: (usize, usize),
+    /// 動かない列に内容(サイドバーなど)があるときは、動いた列の範囲だけを最後に切り出す
+    crop: Option<(usize, usize)>,
 }
 
 impl Stitcher {
     pub fn new(first: RgbaImage) -> Self {
-        Stitcher { w: first.width(), h: first.height(), raw: first.as_raw().clone(), prev: first, bands: None }
+        Stitcher { w: first.width(), h: first.height(), raw: first.as_raw().clone(), prev: first, bands: None, cols: (0, 0), crop: None }
     }
 
     pub fn height(&self) -> usize {
@@ -63,7 +89,18 @@ impl Stitcher {
         }
         let h = self.h as usize;
         let row = self.w as usize * 4;
-        let (ha, hb) = (row_info(&self.prev), row_info(&next));
+        if self.bands.is_none() {
+            // 最初の送りで、動いた列を調べる。何も動いていなければ、これ以上スクロールしない
+            let Some((l, r)) = changed_cols(&self.prev, &next) else { return Step::End };
+            // 右端はスクロールバー(つまみだけが動く)なので、比べる対象から外す
+            let bar = ((r - l) / 25).clamp(1, 24).min((r - l) / 3);
+            self.cols = (l, (r - bar).max(l + 1));
+            let w = self.w as usize;
+            if (0..l).chain(r..w).any(|x| !column_is_uniform(&self.prev, x)) {
+                self.crop = Some((l, r));
+            }
+        }
+        let (ha, hb) = (row_info(&self.prev, self.cols), row_info(&next, self.cols));
         let same = (0..h).filter(|&i| ha[i].0 == hb[i].0).count();
         if same * 1000 >= h * 995 {
             return Step::End;
@@ -113,7 +150,11 @@ impl Stitcher {
             self.raw.extend_from_slice(&self.prev.as_raw()[(h - bs) * row..]);
         }
         let rows = self.raw.len() / row;
-        RgbaImage::from_raw(self.w, rows as u32, self.raw).expect("rows * width * 4")
+        let img = RgbaImage::from_raw(self.w, rows as u32, self.raw).expect("rows * width * 4");
+        match self.crop {
+            Some((l, r)) => image::imageops::crop_imm(&img, l as u32, 0, (r - l) as u32, rows as u32).to_image(),
+            None => img,
+        }
     }
 }
 
@@ -164,13 +205,42 @@ fn grab_settled(rect: (i32, i32, i32, i32)) -> Option<RgbaImage> {
     Some(last)
 }
 
-/// `rect` の中央にカーソルを置いてホイールで送りながら撮り、1枚につなぐ。`Esc` で中止(`None`)。
+/// ホイールで内容が動く場所を探す。中央から始め、動かなければ範囲内のほかの場所を順に試す
+/// (サイドバーと並んだ画面などで、中央がスクロールしない部分のことがある)。
+fn find_scroll_point(rect: (i32, i32, i32, i32), first: &RgbaImage) -> (i32, i32) {
+    let (w, h) = (rect.2 - rect.0, rect.3 - rect.1);
+    let at = |fx: f32, fy: f32| (rect.0 + (w as f32 * fx) as i32, rect.1 + (h as f32 * fy) as i32);
+    let mut spots = vec![at(0.5, 0.5)];
+    for fy in [0.5, 0.3, 0.7] {
+        for fx in [0.3, 0.7, 0.15, 0.85, 0.5] {
+            spots.push(at(fx, fy));
+        }
+    }
+    for (x, y) in spots {
+        set_cursor(x, y);
+        pause(60);
+        wheel(1);
+        pause(250);
+        let Some(now) = grab_settled(rect) else { break };
+        if now.as_raw() != first.as_raw() {
+            // 動いた。元の位置へ戻す
+            wheel(-1);
+            pause(250);
+            let _ = grab_settled(rect);
+            return (x, y);
+        }
+    }
+    at(0.5, 0.5)
+}
+
+/// 範囲 `rect` の中でホイールを送りながら撮り、1枚につなぐ。`Esc` で中止(`None`)。
 pub fn capture_scrolling(rect: (i32, i32, i32, i32)) -> Option<RgbaImage> {
-    let (cx, cy) = ((rect.0 + rect.2) / 2, (rect.1 + rect.3) / 2);
     let height = (rect.3 - rect.1).max(1);
-    set_cursor(cx, cy);
+    set_cursor((rect.0 + rect.2) / 2, (rect.1 + rect.3) / 2);
     pause(150);
-    let mut st = Stitcher::new(grab_settled(rect)?);
+    let first = grab_settled(rect)?;
+    let (cx, cy) = find_scroll_point(rect, &first);
+    let mut st = Stitcher::new(grab_settled(rect).unwrap_or(first));
     // 1回の送りが範囲の半分くらいになるように、最初の結果を見て刻みを合わせる
     let mut notches = if height < 400 { 1 } else { 3 };
     let mut tuned = false;
@@ -262,5 +332,33 @@ mod tests {
         assert_eq!(out.get_pixel(0, 0), &Rgba([9, 9, 200, 255]));
         assert_eq!(out.get_pixel(0, 399), &Rgba([200, 0, 9, 255]));
         assert_eq!(out.get_pixel(0, 250), p.get_pixel(0, 250));
+    }
+
+    #[test]
+    fn ignores_fixed_sidebar_and_crops_to_scrolling_pane() {
+        let p = page(700, 40);
+        let side = |v: RgbaImage| {
+            // 左 30 列は、スクロールしない縞模様のサイドバー
+            RgbaImage::from_fn(70, 200, |x, y| {
+                if x < 30 { Rgba([(y * 13 % 251) as u8, 90, (x * 40) as u8, 255]) } else { *v.get_pixel(x - 30, y) }
+            })
+        };
+        let mut st = Stitcher::new(side(view(&p, 0, 200)));
+        assert!(matches!(st.push(side(view(&p, 120, 200))), Step::Added(120)));
+        assert!(matches!(st.push(side(view(&p, 240, 200))), Step::Added(120)));
+        assert!(matches!(st.push(side(view(&p, 240, 200))), Step::End));
+        let out = st.finish();
+        assert_eq!(out.dimensions(), (40, 440));
+        assert_eq!(out.as_raw(), view(&p, 0, 440).as_raw());
+    }
+
+    /// 実際の画面をスクロール撮影する手元確認用。`SM_RECT="left,top,right,bottom"`(物理座標)と `SM_OUT`(保存先 PNG)を指定する。
+    #[test]
+    #[ignore]
+    fn live_scroll() {
+        let v: Vec<i32> = std::env::var("SM_RECT").unwrap().split(',').map(|n| n.trim().parse().unwrap()).collect();
+        let img = capture_scrolling((v[0], v[1], v[2], v[3])).expect("cancelled");
+        img.save(std::env::var("SM_OUT").unwrap()).unwrap();
+        println!("{}x{}", img.width(), img.height());
     }
 }
