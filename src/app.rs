@@ -274,8 +274,13 @@ impl App {
     }
 
     fn open_album(&mut self, ctx: &Context) {
-        // 撮影中・編集中は、作業を壊さないよう、そのウィンドウを前面に出すだけにする
-        if matches!(self.mode, Mode::Selecting(_) | Mode::Editing(_)) {
+        // 範囲選択中は、選択をやめてから開く(全画面の覆いが前面にあって、アルバムが見えないため)
+        if matches!(self.mode, Mode::Selecting(_)) {
+            self.go_idle(ctx);
+        }
+        // 編集中は、撮った画像や編集内容を失わないよう、開かずに理由を出す
+        if let Mode::Editing(e) = &mut self.mode {
+            e.status = "編集中はアルバムを開けません。「完了」か「破棄」のあとに開いてください".into();
             ctx.send_viewport_cmd(ViewportCommand::Focus);
             return;
         }
@@ -1437,6 +1442,10 @@ impl eframe::App for App {
                 Cmd::Settings => self.open_settings(ctx),
                 Cmd::Album => self.open_album(ctx),
                 Cmd::OpenFolder => {
+                    // 範囲選択の覆いは最前面にあり、エクスプローラーが隠れるので、先にやめる
+                    if matches!(self.mode, Mode::Selecting(_)) {
+                        self.go_idle(ctx);
+                    }
                     let _ = std::fs::create_dir_all(&self.cfg.save_dir);
                     crate::winutil::open_in_explorer(&self.cfg.save_dir);
                 }
