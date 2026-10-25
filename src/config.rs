@@ -57,7 +57,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             hotkey: "ctrl+shift+s".into(),
-            save_dir: dirs::picture_dir().unwrap_or_else(|| PathBuf::from(".")).join("SnapMark"),
+            save_dir: default_save_dir(),
             format: "png".into(),
             name_pattern: "Screenshot_%Y%m%d_%H%M%S".into(),
             jpeg_quality: 90,
@@ -92,6 +92,16 @@ impl Config {
 }
 
 /// 実行ファイルと同じフォルダの INI。
+/// 既定の保存先: 実行ファイルと同じ場所の `img` フォルダ
+pub fn default_save_dir() -> PathBuf {
+    std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("img"))).unwrap_or_else(|| PathBuf::from("img"))
+}
+
+/// 以前の版が自動で決めていた保存先か(ユーザーが選んだものではない)
+fn is_old_default_dir(p: &std::path::Path) -> bool {
+    [dirs::picture_dir(), dirs::home_dir()].into_iter().flatten().any(|d| p == d.join("SnapMark"))
+}
+
 pub fn ini_path() -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -110,7 +120,8 @@ fn parse(text: &str) -> Config {
         let (k, v) = (k.trim().to_ascii_lowercase(), v.trim());
         match k.as_str() {
             "hotkey" => cfg.hotkey = v.into(),
-            "save_dir" if !v.is_empty() => cfg.save_dir = PathBuf::from(v),
+            // 以前の版の自動の保存先は、ユーザーの指定ではないので、新しい既定(img)に改める
+            "save_dir" if !v.is_empty() && !is_old_default_dir(std::path::Path::new(v)) => cfg.save_dir = PathBuf::from(v),
             "format" => cfg.format = v.to_ascii_lowercase(),
             "name_pattern" if !v.is_empty() => cfg.name_pattern = v.into(),
             "jpeg_quality" => cfg.jpeg_quality = v.parse().unwrap_or(cfg.jpeg_quality).clamp(1, 100),

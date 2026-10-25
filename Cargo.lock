@@ -3491,7 +3491,7 @@ dependencies = [
 
 [[package]]
 name = "snapmark"
-version = "0.8.11"
+version = "0.8.12"
 dependencies = [
  "ab_glyph",
  "anyhow",
